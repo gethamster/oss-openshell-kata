@@ -22,6 +22,8 @@ mod reaper;
 mod store;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod workspace_tests;
 
 pub use broker_config::HostedNetworkConfig;
 #[cfg(test)]
@@ -215,10 +217,15 @@ fn network() -> Result<ipnet::IpNet> {
 
 async fn workspace(client: &client::Client, workspace: &str, action: Action) -> Result<()> {
     let namespace = policy::namespace(workspace)?;
-    policy::check_namespace(
-        &client.required("namespace", Some(&namespace), None).await?,
-        workspace,
-    )?;
+    let observed = client.get("namespace", Some(&namespace), None).await?;
+    let Some(observed) = observed else {
+        ensure!(
+            matches!(action, Action::DeleteWorkspace),
+            "required Kubernetes resource is absent"
+        );
+        return Ok(());
+    };
+    policy::check_namespace(&observed, workspace)?;
     if matches!(action, Action::DeleteWorkspace) {
         let pods = client.required("pods", None, Some(&namespace)).await?;
         let items = pods["items"]
