@@ -6,32 +6,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 pub(super) fn namespace(workspace: &str) -> Result<String> {
-    ensure!(
-        !workspace.is_empty()
-            && workspace.len() <= 63
-            && workspace.as_bytes()[0].is_ascii_alphanumeric()
-            && workspace.as_bytes()[workspace.len() - 1].is_ascii_alphanumeric()
-            && workspace
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-            && !matches!(
-                workspace,
-                "default"
-                    | "kube-system"
-                    | "network"
-                    | "master"
-                    | "foundry"
-                    | "dashboard"
-                    | "platform"
-            ),
-        "invalid tenant workspace"
-    );
-    let suffix = if workspace.len() <= 55 {
-        workspace.to_owned()
-    } else {
-        format!("{:x}", Sha256::digest(workspace.as_bytes()))[..24].to_owned()
-    };
-    Ok(format!("sandbox-{suffix}"))
+    crate::hosted::namespace(workspace)
 }
 
 pub(super) fn resource_id(sandbox: &str) -> Result<String> {

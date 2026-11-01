@@ -35,6 +35,13 @@ mutations with the owner of a shared environment; other consumers may rely on it
 Stay within the authorized local environment even when its configuration names
 remote dependencies.
 
+Local development does not need another approval for installation-owned test
+services, isolated databases, test accounts, or disposable development
+credentials. Create, restart, reconfigure, exchange tokens, and rotate those
+local development credentials as needed for verification. Preserve shared state
+and keep credential values out of logs and source control; remote customer
+resources and production credentials retain their separate authorization.
+
 ## Verify the affected journey
 
 Choose the smallest existing smoke or end-to-end check that exercises the change

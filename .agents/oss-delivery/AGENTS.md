@@ -49,6 +49,15 @@ decide pass or fail, and ship. Do not turn a bounded fix into speculative
 engineering, permanent test infrastructure, or repeated review loops. Honor
 narrower requests and existing protections; do not ask again for granted authority.
 
+Local development is authorized without additional approval. Create and iterate
+installation-owned local services, isolated test databases, test users and agent
+principals, and disposable development credentials as needed to build and verify
+the system. This includes local configuration, restarts, token exchange, and
+credential rotation within those development resources. Preserve shared local
+state and other contributors' work, and keep credentials out of logs and Git.
+This standing authorization does not extend to production credentials, remote
+customer resources, spending money, or irreversible deletion of existing data.
+
 Verified-delivery governs the amount of process across this pack. Specialist skills
 and source digests guide the affected work; they do not add tests, reviews, CI jobs,
 coverage targets, or redesign by default. Read only relevant references, reuse valid

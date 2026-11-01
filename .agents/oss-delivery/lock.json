@@ -1,9 +1,9 @@
 {
   "repository": "https://github.com/gethamster/oss-delivery",
-  "revision": "998786771ecc7ebfcd32309e34a26df3a8c2b96f",
+  "revision": "a683026752e57e988703349766fb02451a1971d0",
   "files": {
     ".agents/oss-delivery/AGENTS.md": {
-      "sha256": "b2b8daa2607a2a4ba27c4c8fc674a617c4343f9a4a4b9058a0eb06cd4625466c",
+      "sha256": "43744154305fd6b498b976f8ab8c0e3deae06a5f59e63b3954dcbeda4cc1b323",
       "mode": 420
     },
     ".agents/skills/domain-language/SKILL.md": {
@@ -111,7 +111,7 @@
       "mode": 420
     },
     ".agents/skills/interface-design/assets/studio/src/tokens.css": {
-      "sha256": "5ef4fc8aec04e49636eadd5f6ee929cdfedf64688e513a8f09a3f6408579ea71",
+      "sha256": "b777d4d2db4788ce6adf8bdac7558762b9d8bea9820cfcc890146024ef34c683",
       "mode": 420
     },
     ".agents/skills/interface-design/references/feedback-and-accessibility.md": {
@@ -123,7 +123,7 @@
       "mode": 420
     },
     ".agents/skills/local-verification/SKILL.md": {
-      "sha256": "7e1ef981ae19342f8d9ab6c6e8953de2fceade73c0663f862f29570cd0cf91c3",
+      "sha256": "b49d092c62fc9790992043216a9bab12a560777eceda4c0d961be4f5a5ef40d9",
       "mode": 420
     },
     ".agents/skills/local-verification/agents/openai.yaml": {

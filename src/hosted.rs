@@ -49,7 +49,7 @@ pub struct RuntimeProof {
     pub fence: Option<crate::network::hosted_fence::HostedFenceProof>,
 }
 
-/// Derive the only permitted namespace for a platform-owned workspace.
+/// Derive the tenant namespace; live resource ownership is checked separately.
 pub fn namespace(workspace: &str) -> Result<String> {
     ensure!(
         !workspace.is_empty()
@@ -61,13 +61,7 @@ pub fn namespace(workspace: &str) -> Result<String> {
             && workspace.as_bytes()[workspace.len() - 1].is_ascii_alphanumeric()
             && !matches!(
                 workspace,
-                "default"
-                    | "kube-system"
-                    | "network"
-                    | "master"
-                    | "foundry"
-                    | "dashboard"
-                    | "platform"
+                "default" | "kube-system" | "network" | "master" | "dashboard" | "platform"
             ),
         "unsupported hosted workspace"
     );

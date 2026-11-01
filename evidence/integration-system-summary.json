@@ -52,7 +52,7 @@
     "Kata runtime-rs 4.3.1",
     "Docker 29"
   ],
-  "authorization": "Scoped local Foundry authorization fixture; does not qualify Google sign-in or a hosted deployment.",
+  "authorization": "Scoped local Studio authorization fixture; does not qualify Google sign-in or a hosted deployment.",
   "initial_stdin_regression": "512 KiB binary initial payload followed by interactive tail and explicit EOF; ordered exactly once",
   "cleanup": {
     "gateway_sandboxes": 0,
