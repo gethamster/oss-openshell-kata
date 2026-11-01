@@ -672,7 +672,7 @@ impl Runtime {
         control: mpsc::Sender<o::SupervisorMessage>,
     ) -> Result<()> {
         let mut child = None;
-        let (mut reader, mut writer): (
+        let (mut reader, writer): (
             Box<dyn AsyncRead + Send + Unpin>,
             Box<dyn AsyncWrite + Send + Unpin>,
         ) = match open.target {
@@ -702,7 +702,7 @@ impl Runtime {
             })
             .await?;
         let mut client = self.client().await?;
-        let mut incoming = credentials::handshake(&self.credential_handshakes, async {
+        let incoming = credentials::handshake(&self.credential_handshakes, async {
             // Token refresh consumes the old bearer on the gateway before its
             // response arrives. Build the request only after this guard is held.
             let request=self.request(ReceiverStream::new(receiver))?;
@@ -738,19 +738,54 @@ impl Runtime {
             }
             Ok::<_, anyhow::Error>(())
         };
-        let inbound = async {
-            while let Some(frame) = incoming.message().await? {
-                if let Some(o::relay_frame::Payload::Data(data)) = frame.payload {
-                    writer.write_all(&data).await?;
-                }
-            }
-            writer.shutdown().await?;
-            Ok::<_, anyhow::Error>(())
-        };
+        let inbound = relay_to_guest(incoming, writer);
         tokio::select! { () = self.cancel.cancelled() => {}, result = async { tokio::try_join!(outgoing, inbound) } => { result?; } }
         if let Some(mut child) = child {
             let _ = child.kill().await;
         }
+        Ok(())
+    }
+}
+
+/// Own the input handle so EOF also closes subprocess stdin. ChildStdin's
+/// shutdown only flushes; retaining it would keep SSH and its gateway slot live.
+async fn relay_to_guest<S, W>(mut incoming: S, mut writer: W) -> Result<()>
+where
+    S: futures::Stream<Item = Result<o::RelayFrame, tonic::Status>> + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    use futures::TryStreamExt;
+    while let Some(frame) = incoming.try_next().await? {
+        if let Some(o::relay_frame::Payload::Data(data)) = frame.payload {
+            writer.write_all(&data).await?;
+        }
+    }
+    writer.shutdown().await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod relay_tests {
+    use super::*;
+    use std::process::Stdio;
+
+    #[tokio::test]
+    async fn relay_eof_closes_child_stdin_and_preserves_output() -> Result<()> {
+        let mut child = tokio::process::Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let input = child.stdin.take().context("child stdin")?;
+        let mut output = child.stdout.take().context("child stdout")?;
+        let frames = futures::stream::iter([Ok(o::RelayFrame {
+            payload: Some(o::relay_frame::Payload::Data(b"relay EOF".to_vec())),
+        })]);
+        relay_to_guest(frames, input).await?;
+        let mut received = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), output.read_to_end(&mut received)).await??;
+        assert_eq!(received, b"relay EOF");
+        assert!(child.wait().await?.success());
         Ok(())
     }
 }
