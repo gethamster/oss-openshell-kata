@@ -12,7 +12,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && install -D target/release/kata-workspace /out/kata-workspace
 
 FROM docker@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977
-RUN apk add --no-cache openssh-server openssh-sftp-server bash coreutils curl iproute2 bind-tools netcat-openbsd \
+RUN apk add --no-cache openssh-server openssh-sftp-server bash coreutils curl iproute2 bind-tools netcat-openbsd python3 \
     && addgroup -g 1000 sandbox \
     && adduser -D -h /sandbox -u 1000 -G sandbox sandbox \
     && passwd -d sandbox \
