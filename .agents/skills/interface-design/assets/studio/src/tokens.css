@@ -66,7 +66,7 @@
   --hover: var(--hover-solid);
   /* Opaque twin of --muted so chips match hovered-card fills. */
   --hover-solid: var(--muted);
-  /* Foundry keeps hover surfaces opaque. */
+  /* Keep hover surfaces opaque. */
   --hover-secondary: var(--secondary);
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: var(--color-white);
@@ -104,7 +104,7 @@
   --neutral-800: oklch(0.27 0 0);
   --neutral-700: oklch(0.371 0 0); /* Tailwind neutral-700 */
 
-  /* Foundry surface roles map to Studio’s named palette. */
+  /* Surface roles map to Studio’s named palette. */
   --surface-canvas: var(--secondary);
   --surface-navigation: var(--sidebar);
   --surface-page: var(--background);

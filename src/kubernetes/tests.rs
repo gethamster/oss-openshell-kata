@@ -203,6 +203,14 @@ fn resources_require_exact_owner_and_namespace_tenant() {
     let namespace = json!({"metadata":{"labels":{"platform.tryhamster.dev/tenant":"1h31c","platform.tryhamster.dev/role":"sandbox"}}});
     policy::check_namespace(&namespace, "1h31c").expect("namespace");
     assert!(policy::check_namespace(&namespace, "other").is_err());
+    // Instance names do not authorize access: every namespace must be enrolled
+    // for this exact tenant and carry the sandbox role.
+    let platform_namespace = json!({"metadata":{"labels":{
+        "platform.tryhamster.dev/tenant":"self-hosted",
+        "platform.tryhamster.dev/role":"control-plane"
+    }}});
+    assert!(policy::check_namespace(&platform_namespace, "self-hosted").is_err());
+    assert!(policy::check_namespace(&json!({"metadata":{}}), "self-hosted").is_err());
 }
 #[test]
 fn per_sandbox_locks_do_not_serialize_other_tenants() {
