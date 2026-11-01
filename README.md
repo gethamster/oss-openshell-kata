@@ -136,3 +136,14 @@ local profile does not qualify its Kubernetes artifacts or tenant cutover.
 The external compute interface is versioned, while the supervisor protocol is
 internal. Upgrading OpenShell requires requalification. See [porting notes](docs/PORTING.md)
 and [the delivery plan](docs/DELIVERY_PLAN.md) for remaining production work.
+
+## License
+
+Hamster-authored work and modifications are source-available under the
+[Apache License 2.0 with Commons Clause License Condition v1.0](LICENSE).
+This combination is not an OSI-approved open-source license. Previously
+granted licenses remain in effect for earlier versions.
+
+NVIDIA upstream material remains under the unchanged
+[upstream Apache 2.0 license](LICENSE-UPSTREAM). The vendored OpenShell protocol
+retains its [own license](proto/LICENSE) and provenance.
