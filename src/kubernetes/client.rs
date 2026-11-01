@@ -52,7 +52,12 @@ impl Client {
         if let Some(namespace) = namespace {
             args.extend(["-n", namespace]);
         }
-        args.extend(["-o", "json", "--ignore-not-found"]);
+        args.extend(["-o", "json"]);
+        // kubectl suppresses JSON for an empty list with --ignore-not-found.
+        // Only named lookups use absence as an optional resource observation.
+        if name.is_some() {
+            args.push("--ignore-not-found");
+        }
         let output = self.checked(&args, None).await?;
         if output.stdout.iter().all(u8::is_ascii_whitespace) {
             return Ok(None);

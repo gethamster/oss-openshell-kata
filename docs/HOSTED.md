@@ -168,6 +168,9 @@ new keys and a new Pod identity without extending the lease. Delete removes the
 Pod, PVC, Secret, network policy and retained key files. Nonce-bound abort never
 removes a preexisting generation and preserves a preexisting PVC on failed start.
 Cleanup verifies ownership and absence; it never deletes shared namespaces.
+Workspace deletion accepts an already absent namespace after a successful
+authenticated lookup. Existing namespaces still require matching ownership and
+an empty managed-guest inventory; failed observations never count as absence.
 
 ## Control and recovery
 
