@@ -183,14 +183,24 @@ impl Attachment {
 }
 
 /// Plan the complete generation identity without changing node resources.
-pub async fn plan_attachment(node: &Node, id: &str, nonce: &str) -> Result<Attachment> {
+///
+/// `reserved` holds gateway addresses retained by other guests whose links may be
+/// absent (stopped across a reboot, or planned by a concurrent create).
+pub async fn plan_attachment(
+    node: &Node,
+    id: &str,
+    nonce: &str,
+    reserved: &[Ipv4Addr],
+) -> Result<Attachment> {
     let all = node.node(&args(&["ip", "-j", "address", "show"])).await?;
     let occupied = String::from_utf8(all.stdout)?;
     let digest = Sha256::digest(id.as_bytes());
     let seed = u16::from_be_bytes([digest[0], digest[1]]) % 16384;
     (0..16384)
         .map(|offset| Attachment::for_id(id, nonce, (seed + offset) % 16384))
-        .find(|a| !occupied.contains(&a.gateway_ip.to_string()))
+        .find(|a| {
+            !reserved.contains(&a.gateway_ip) && !occupied.contains(&a.gateway_ip.to_string())
+        })
         .context("no private network allocation available")
 }
 

@@ -172,6 +172,35 @@ impl Guest {
     }
 }
 
+/// Concurrent lifecycle processes that provision or tear down guests.
+pub const PROVISIONING_SLOTS: usize = 16;
+/// Concurrent lifecycle processes that revalidate running guests, budgeted apart
+/// from provisioning so neither starves the other.
+pub const OBSERVATION_SLOTS: usize = 16;
+
+fn lifecycle_slots(action: &str) -> &'static tokio::sync::Semaphore {
+    static PROVISIONING: tokio::sync::Semaphore =
+        tokio::sync::Semaphore::const_new(PROVISIONING_SLOTS);
+    static OBSERVATION: tokio::sync::Semaphore =
+        tokio::sync::Semaphore::const_new(OBSERVATION_SLOTS);
+    if matches!(action, "verify" | "update") {
+        &OBSERVATION
+    } else {
+        &PROVISIONING
+    }
+}
+
+/// Whether an error is a missed deadline (host or gateway contention) rather
+/// than a verified result. Callers may retry these; verified failures stand.
+pub fn is_deadline(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.is::<tokio::time::error::Elapsed>()
+            || cause
+                .downcast_ref::<tonic::Status>()
+                .is_some_and(|status| status.code() == tonic::Code::DeadlineExceeded)
+    })
+}
+
 pub async fn lifecycle(config: &Config, action: &str, id: &SandboxId) -> Result<Option<Guest>> {
     lifecycle_with_policy(config, action, id, None, None).await
 }
@@ -249,6 +278,11 @@ pub async fn lifecycle_for_policy(
         (_, "create" | "start") => 600,
         _ => 30,
     });
+    // The deadline bounds execution only; waiting for a slot is not charged to it.
+    let _slot = lifecycle_slots(action)
+        .acquire()
+        .await
+        .context("lifecycle slots closed")?;
     let output = tokio::time::timeout(
         timeout,
         command

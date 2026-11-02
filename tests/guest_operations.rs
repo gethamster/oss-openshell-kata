@@ -297,3 +297,73 @@ async fn protected_lifecycle_preserves_the_exact_fresh_challenge() -> anyhow::Re
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_burst_of_lifecycle_operations_is_bounded_parallel_and_never_times_out()
+-> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let cfg = config(root.path(), RuntimeProfile::Local);
+    let active = root.path().join("active");
+    fs::create_dir(&active)?;
+    // A slow node: every operation takes a while and records the concurrency it saw.
+    script(
+        &cfg.lifecycle,
+        &format!(
+            "mkdir '{dir}/'\"$$\"\nls '{dir}' | wc -l >> '{dir}.log'\nsleep 0.3\nrmdir '{dir}/'\"$$\"",
+            dir = active.display()
+        ),
+    )?;
+    let burst = guest::PROVISIONING_SLOTS * 2 + 4;
+    let started = std::time::Instant::now();
+    let tasks: Vec<_> = (0..burst)
+        .map(|index| {
+            let cfg = cfg.clone();
+            tokio::spawn(async move {
+                let id = SandboxId::parse(&format!("burst-{index}"))?;
+                guest::lifecycle(&cfg, "stop", &id).await
+            })
+        })
+        .collect();
+    for task in tasks {
+        task.await??;
+    }
+    let peak = fs::read_to_string(root.path().join("active.log"))?
+        .lines()
+        .filter_map(|line| line.trim().parse::<usize>().ok())
+        .max()
+        .unwrap_or_default();
+    assert!(peak > 1, "distinct sandboxes run in parallel");
+    assert!(
+        peak <= guest::PROVISIONING_SLOTS,
+        "peak {peak} exceeds the slot budget"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "slot waiting is not charged to the execution deadline"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn revalidation_defers_missed_deadlines_but_never_a_verified_violation() {
+    use openshell_kata::supervisor::{REVALIDATION_GRACE, revalidation_deferrable};
+    use std::time::Duration;
+    let elapsed = tokio::time::timeout(Duration::from_millis(1), std::future::pending::<()>())
+        .await
+        .expect_err("deadline");
+    let missed = anyhow::Error::from(elapsed).context("guest lifecycle timed out");
+    assert!(guest::is_deadline(&missed));
+    assert!(revalidation_deferrable(&missed, Duration::from_secs(10)));
+    assert!(
+        !revalidation_deferrable(&missed, REVALIDATION_GRACE),
+        "a guest cannot run unproven past the grace"
+    );
+    let gateway = anyhow::Error::from(tonic::Status::deadline_exceeded("busy"));
+    assert!(revalidation_deferrable(&gateway, Duration::ZERO));
+    for verified in [
+        anyhow::anyhow!("runtime route changed during verification"),
+        anyhow::Error::from(tonic::Status::permission_denied("revoked")),
+    ] {
+        assert!(!revalidation_deferrable(&verified, Duration::ZERO));
+    }
+}
