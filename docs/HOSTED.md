@@ -285,3 +285,16 @@ the pinned TCX object, attaches and reads back both classifiers on a temporary
 dummy interface, then drops both links and deletes that interface before
 reporting success. It creates no BPF pins and touches no live guest interface.
 A kernel version string alone is not a capability proof.
+
+
+Provider node bootstrap sets `provider_bootstrap: true` in the root-owned runtime
+guard configuration. Startup takes a shared lock on
+`/run/openshell-kata/provider-bootstrap.lock`; bootstrap holds the exclusive lock
+through preparation and qualification. The lock inode must never be replaced.
+Before releasing it, bootstrap atomically writes
+`/run/openshell-kata/provider-bootstrap-ready.json` with `version: 1`, the exact
+`node_uid`, current `boot_id`, and `guard_config_sha256` of the written runtime
+guard configuration bytes. A missing or mismatched receipt rejects startup;
+waiting for the exclusive lock is bounded to sixty seconds. The shared lock
+remains held until the official shim is executed. Probe, proof service,
+informational shim operations, and deletion remain available during bootstrap.

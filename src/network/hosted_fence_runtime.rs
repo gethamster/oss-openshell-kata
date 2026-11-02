@@ -26,6 +26,10 @@ const LIMIT: u64 = 131072;
 #[serde(deny_unknown_fields)]
 pub(super) struct GuardConfig {
     version: u32,
+    #[serde(default)]
+    pub(super) provider_bootstrap: bool,
+    #[serde(skip)]
+    pub(super) source_sha256: String,
     pub(super) node_uid: String,
     pub(super) shim_path: PathBuf,
     shim_sha256: String,
@@ -37,8 +41,11 @@ pub(super) struct GuardConfig {
     pub(super) guard_path: PathBuf,
 }
 impl GuardConfig {
-    fn load() -> Result<Self> {
-        let config: Self = read_trusted(Path::new(CONFIG_PATH))?;
+    pub(super) fn load() -> Result<Self> {
+        trusted_path(Path::new(CONFIG_PATH))?;
+        let bytes = read_bytes(Path::new(CONFIG_PATH))?;
+        let mut config: Self = serde_json::from_slice(&bytes)?;
+        config.source_sha256 = format!("{:x}", Sha256::digest(&bytes));
         ensure!(
             config.version == 1,
             "unsupported runtime guard configuration"
@@ -222,8 +229,15 @@ fn internal(config: &GuardConfig, args: &[String], mode: Mode) -> Result<()> {
     }
 }
 fn wrap_shim(config: &GuardConfig, args: &[String]) -> Result<()> {
-    // These protocols do not create or boot a VM; preserve official shim behavior.
     let starts = args.iter().filter(|arg| arg.as_str() == "start").count();
+    // Hold the shared lock through exec for boot operations. Informational
+    // calls and deletion remain available during node bootstrap and recovery.
+    let bootstrap = if starts > 0 {
+        super::hosted_fence_bootstrap::enter(config)?
+    } else {
+        None
+    };
+    let config = bootstrap.as_ref().map_or(config, |(_, current)| current);
     if starts > 0 {
         ensure!(
             starts == 1 && args.last().is_some_and(|arg| arg == "start"),
@@ -476,11 +490,14 @@ pub(super) fn trusted_path(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn read_trusted<T: DeserializeOwned>(path: &Path) -> Result<T> {
+pub(super) fn read_trusted<T: DeserializeOwned>(path: &Path) -> Result<T> {
     trusted_path(path)?;
     read_bounded(path)
 }
 fn read_bounded<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    Ok(serde_json::from_slice(&read_bytes(path)?)?)
+}
+fn read_bytes(path: &Path) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     OpenOptions::new()
         .read(true)
@@ -492,7 +509,7 @@ fn read_bounded<T: DeserializeOwned>(path: &Path) -> Result<T> {
         bytes.len() <= LIMIT as usize,
         "oversized host fence configuration"
     );
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok(bytes)
 }
 fn file_sha256(path: &Path) -> Result<String> {
     let mut file = File::open(path)?;
