@@ -419,7 +419,7 @@ impl Runtime {
             }
         };
         let mut applied = self.vm_policy.clone();
-        self.check_providers(&mut client, &snapshot).await?;
+        let snapshot = self.check_providers(&mut client, snapshot).await?;
         let mut attempt = 0;
         // A boot burst can delay the first proof; a missed deadline is retried, a
         // verified mismatch is not.
@@ -494,7 +494,7 @@ impl Runtime {
                                 let mut request = self.request(s::GetSandboxConfigRequest { name:self.spec.name.clone(), ..Default::default() })?;
                                 request.set_timeout(Duration::from_secs(10));
                                 let effective = client.get_sandbox_config(request).await?.into_inner();
-                                self.check_providers(&mut client,&effective).await?;
+                                let effective = self.check_providers(&mut client,effective).await?;
                                 // Policy changes apply at once; unchanged native guests are
                                 // re-proven on a slower cadence to bound host load at fleet scale.
                                 let proven = self.operator_policy.is_none()
@@ -606,17 +606,40 @@ impl Runtime {
     async fn check_providers(
         &self,
         client: &mut o::open_shell_client::OpenShellClient<Channel>,
-        snapshot: &s::GetSandboxConfigResponse,
-    ) -> Result<()> {
-        let providers = client
-            .get_sandbox_provider_environment(self.request(
-                o::GetSandboxProviderEnvironmentRequest {
-                    sandbox_id: self.id.to_string(),
+        mut snapshot: s::GetSandboxConfigResponse,
+    ) -> Result<s::GetSandboxConfigResponse> {
+        // Attachment and credential updates can land between these two RPCs.
+        // Re-read the pair before interpreting a normal revision race as a
+        // failed runtime; no mixed pair may reach the mediator or acceptance.
+        let mut providers = None;
+        for attempt in 0..4 {
+            let mut request = self.request(o::GetSandboxProviderEnvironmentRequest {
+                sandbox_id: self.id.to_string(),
+                ..Default::default()
+            })?;
+            request.set_timeout(Duration::from_secs(5));
+            let candidate = client
+                .get_sandbox_provider_environment(request)
+                .await?
+                .into_inner();
+            if candidate.provider_env_revision == snapshot.provider_env_revision
+                && candidate.provider_attachment_epoch == snapshot.provider_attachment_epoch
+                && candidate.policy_hash == snapshot.policy_hash
+            {
+                providers = Some(candidate);
+                break;
+            }
+            if attempt < 3 {
+                let mut request = self.request(s::GetSandboxConfigRequest {
+                    name: self.spec.name.clone(),
                     ..Default::default()
-                },
-            )?)
-            .await?
-            .into_inner();
+                })?;
+                request.set_timeout(Duration::from_secs(5));
+                snapshot = client.get_sandbox_config(request).await?.into_inner();
+            }
+        }
+        let providers =
+            providers.context("provider configuration did not stabilize within its retry bound")?;
         if self
             .hosted_network
             .as_ref()
@@ -625,7 +648,7 @@ impl Runtime {
             self.hosted_network
                 .as_ref()
                 .context("provider network missing")?
-                .compile(snapshot)?;
+                .compile(&snapshot)?;
             let token = self
                 .gateway_token
                 .read()
@@ -657,7 +680,7 @@ impl Runtime {
                 .write()
                 .map_err(|_| anyhow::anyhow!("provider material lock unavailable"))? =
                 Some(material);
-            return Ok(());
+            return Ok(snapshot);
         }
         if !providers.environment.is_empty()
             || !providers.dynamic_credentials.is_empty()
@@ -670,7 +693,7 @@ impl Runtime {
         {
             bail!("provider snapshot is unsupported or does not match effective configuration");
         }
-        Ok(())
+        Ok(snapshot)
     }
     async fn install_provider_material(
         &self,
