@@ -10,7 +10,7 @@ anyhow = "1"
 cap-std = "3"
 cap-fs-ext = "3"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3"
 flate2 = "1"
 httparse = "1"

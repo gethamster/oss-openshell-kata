@@ -95,6 +95,7 @@ trusted service environment settings:
 OPENSHELL_KATA_NODE_TRANSPORT=linux-local
 OPENSHELL_KATA_RESOURCE_PROFILE=foundry-build
 OPENSHELL_KATA_STATE_DIR=/var/lib/system/kata/private-state
+OPENSHELL_KATA_MAX_SANDBOXES=48
 ```
 
 The lifecycle also accepts `--node-transport linux-local` and
@@ -102,16 +103,42 @@ The lifecycle also accepts `--node-transport linux-local` and
 32 vCPUs, 131072 MiB RAM and 262144 MiB private disk. `VmPolicy` retains
 `"profile":"docker-vm"`. CPU and memory appear in the OCI configuration and
 host cgroups, and observations verify actual Dragonball CPU threads and block
-device capacity. At most four retained build disks are admitted, including
-stopped guests. Delete a guest to release its reservation. An immutable
-operator-selected OCI guest image is mandatory for this profile.
+device capacity. An immutable operator-selected OCI guest image is mandatory
+for this profile.
+
+Node capacity is an explicit operator setting: `OPENSHELL_KATA_MAX_SANDBOXES`
+(1 to 64) is the most retained guests the node admits at once, stopped guests
+included. Delete a guest to release its reservation. The adapter reads it as
+`--max-sandboxes` (the same environment variable) and requires it whenever
+native recovery is configured; the lifecycle reads the same variable and
+requires it for `foundry-build`. Both refuse a new guest once the retained
+count reaches the capacity. Capacity is not part of the recovery binding, so
+raising it keeps retained guests; lowering it below the retained count makes
+the adapter refuse to start until guests are deleted. Set it to the
+`max_sandboxes` value in the node's `node.json` (see below). Guest memory is
+allocated lazily and disks are thin, so capacity is bounded by real use rather
+than by 32 vCPU / 128 GiB / 256 GiB per guest.
 
 Build native entrypoints on x86 Linux using `build-linux.sh /absolute/new/bin`.
 Provide an existing bounded `CARGO_TARGET_DIR`, Rust 1.98, musl tools and the
 `x86_64-unknown-linux-musl` target. The script builds native `openshell-kata`,
 `kata-runtime`, `kata-network`, `kata-operator` and a static guest `kata-workspace`.
 The native guest image uses `Dockerfile.local-guest`, whose initializer is
-`guest-init.sh`; the hosted image uses a different initializer. Build and publish
+`guest-init.sh`; the hosted image uses a different initializer.
+
+`Dockerfile.layer` turns any Ubuntu or Debian based environment image into an
+admissible native guest. It installs OpenSSH server, Docker, curl, CA
+certificates and iproute2, makes uid 1000 the `sandbox` user with home
+`/sandbox` and no password (guest SSH stays key-only) (renaming an existing uid 1000 account, such as
+Ubuntu's `ubuntu`), and adds `guest-init.sh`, `sshd_config` and a static
+`kata-workspace` built from this tree. Build it from the repository root with a
+digest-pinned base, then pin the result with `--guest-image` or
+`--additional-guest-image`:
+
+```sh
+docker build -f runtime/Dockerfile.layer \
+  --build-arg BASE=registry.example/env@sha256:... -t registry.example/env-guest .
+``` Build and publish
 that OCI artifact through the owning release pipeline and pass its digest via
 `--guest-image` on the adapter.
 
@@ -125,7 +152,7 @@ runtime/setup-linux.sh \
   --archive /trusted/kata-static-4.3.1-amd64.tar.zst \
   --binary-dir /trusted/bin \
   --pool-dir /var/lib/system/kata/pool \
-  --resource-profile foundry-build --operator foundry
+  --resource-profile foundry-build --operator foundry --max-sandboxes 48
 ```
 
 Setup verifies the official Kata 4.3.1 archive's 1,021,129,805-byte length and
@@ -136,8 +163,11 @@ x86 PCI block transport, and installs the five entrypoints in
 refuses to replace an unrelated one.
 
 A 1280 GiB preallocated thin pool plus 1 GiB metadata file bounds retained SSD
-use. Each private snapshot is capped at 256 GiB. Mandatory zeroing prevents
-recycled block disclosure, and exhaustion returns errors. Containerd metadata
+use. Each private snapshot is capped at 256 GiB, so more than four full guests
+overcommit the pool: a guest write that finds the pool exhausted fails with an
+I/O error (`error_if_no_space`) rather than blocking or touching another
+guest's blocks. Watch `dmsetup status openshell-kata-pool` data usage. Mandatory
+zeroing prevents recycled block disclosure. Containerd metadata
 and snapshotter state live beside the pool on the retained filesystem. Setup
 never truncates or resizes existing backing files. It pins their filesystem UUID
 and inode identities, rejects partial or unowned pool state, and treats a
@@ -165,6 +195,12 @@ It preserves the original disk and expiration deadline.
 `node_verified:true` after checking actual pool identity, zeroing, resource
 configuration, KVM, cgroups, nft availability, devmapper health and service state.
 The installed public configuration is `/etc/openshell-kata/node.json` (mode0600).
+It records the operator capacity as `"max_sandboxes": <1..64>`, which verify
+requires and echoes. Re-running setup with the installed inputs and a new
+`--max-sandboxes` rewrites only that field. A node installed before the field
+existed fails verification until it is added: as root, add
+`"max_sandboxes": 48` to the JSON object (keep mode 0600), then rerun
+`--verify` and restart the adapter with `OPENSHELL_KATA_MAX_SANDBOXES=48`.
 Preserve it with the retained SSD recovery evidence before replacing a boot disk.
 This node check does not certify guest execution: before activation, run the
 real create/verify/stop/restart/delete and adversarial network, storage and

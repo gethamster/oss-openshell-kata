@@ -1,3 +1,4 @@
+use clap::Parser;
 use openshell_kata::{
     config::{Config, RuntimeProfile},
     proto::openshell::{compute::v1 as c, sandbox::v1 as s},
@@ -25,6 +26,7 @@ fn config(root: &Path) -> Config {
         guest_network_cidr: Some("10.176.0.0/16".into()),
         additional_guest_images: Vec::new(),
         recovery_dir: Some(root.join("registry")),
+        max_sandboxes: None,
     }
 }
 fn intent() -> Retained {
@@ -271,12 +273,109 @@ fn native_config(root: &Path) -> anyhow::Result<Config> {
         vm_policy: Some(policy),
         guest_network_cidr: None,
         additional_guest_images: Vec::new(),
+        max_sandboxes: Some(4),
         ..config(root)
     })
 }
 
+fn save_native(store: &Store, index: usize) -> anyhow::Result<()> {
+    let mut retained = intent();
+    retained.sandbox.id = format!("native-{index}");
+    retained.sandbox.workspace = format!("workspace-{index}");
+    store.save(&retained)
+}
+
 #[test]
-fn native_recovery_is_bound_scrubbed_and_caps_all_workspaces_at_four() -> anyhow::Result<()> {
+fn native_capacity_follows_the_operator_setting() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let config = Config {
+        max_sandboxes: Some(48),
+        ..native_config(root.path())?
+    };
+    let store = Store::for_config(&config)?;
+    for index in 0..47 {
+        save_native(&store, index)?;
+    }
+    save_native(&store, 47).expect("the sandbox at capacity minus one is admitted");
+    let refused = save_native(&store, 48).expect_err("a sandbox beyond capacity is refused");
+    assert!(refused.to_string().contains("capacity of 48"), "{refused}");
+    save_native(&store, 0).expect("an existing reservation can be rewritten at capacity");
+    assert_eq!(store.load(&config)?.len(), 48);
+
+    let lowered = Config {
+        max_sandboxes: Some(8),
+        ..config.clone()
+    };
+    assert!(
+        Store::for_config(&lowered)?.load(&lowered).is_err(),
+        "retained inventory above a lowered capacity fails closed"
+    );
+    let raised = Config {
+        max_sandboxes: Some(64),
+        ..config
+    };
+    let raised_store = Store::for_config(&raised)?;
+    assert_eq!(
+        raised_store.load(&raised)?.len(),
+        48,
+        "raising capacity keeps retained intent bound"
+    );
+    save_native(&raised_store, 48)?;
+    Ok(())
+}
+
+#[test]
+fn native_capacity_is_required_bounded_and_native_only() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let native = native_config(root.path())?;
+    for capacity in [1, 64] {
+        Config {
+            max_sandboxes: Some(capacity),
+            ..native.clone()
+        }
+        .validate()?;
+    }
+    for invalid in [
+        Config {
+            max_sandboxes: None,
+            ..native.clone()
+        },
+        Config {
+            max_sandboxes: Some(0),
+            ..native.clone()
+        },
+        Config {
+            max_sandboxes: Some(65),
+            ..native.clone()
+        },
+    ] {
+        assert!(invalid.validate().is_err(), "{:?}", invalid.max_sandboxes);
+        assert!(Store::for_config(&invalid).is_err());
+    }
+    let hosted = Config {
+        max_sandboxes: Some(4),
+        ..config(root.path())
+    };
+    assert!(
+        hosted.validate().is_err(),
+        "the hosted pilot keeps its per-workspace rule"
+    );
+    for (argument, accepted) in [("0", false), ("1", true), ("64", true), ("65", false)] {
+        let parsed = Config::try_parse_from([
+            "openshell-kata",
+            "--socket=/s",
+            "--gateway-ca=/ca",
+            "--lifecycle=/l",
+            "--max-sandboxes",
+            argument,
+        ]);
+        assert_eq!(parsed.is_ok(), accepted, "--max-sandboxes {argument}");
+    }
+    Ok(())
+}
+
+#[test]
+fn native_recovery_is_bound_scrubbed_and_caps_all_workspaces() -> anyhow::Result<()> {
     let root = tempfile::tempdir()?;
     let config = native_config(root.path())?;
     let store = Store::for_config(&config)?;
@@ -361,7 +460,7 @@ fn native_recovery_rejects_legacy_unbound_records_and_unsafe_configuration() -> 
 }
 
 #[test]
-fn native_concurrent_reservations_cannot_exceed_four_disks() -> anyhow::Result<()> {
+fn native_concurrent_reservations_cannot_exceed_capacity() -> anyhow::Result<()> {
     let root = tempfile::tempdir()?;
     let configuration = native_config(root.path())?;
     let store = Store::for_config(&configuration)?;

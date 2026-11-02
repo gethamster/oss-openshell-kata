@@ -88,6 +88,8 @@ pub struct Store {
     root: PathBuf,
     mutation: Arc<Mutex<()>>,
     native_fingerprint: Option<String>,
+    /// Native node capacity; `None` keeps the pilot per-workspace rule.
+    native_capacity: Option<usize>,
 }
 
 impl Store {
@@ -96,13 +98,16 @@ impl Store {
             root,
             mutation: Arc::default(),
             native_fingerprint: None,
+            native_capacity: None,
         }
     }
 
     /// Open recovery for a validated operator configuration.
     ///
-    /// Native records bind to the pinned policy, gateway CA and lifecycle selection;
-    /// legacy hosted records retain their existing two-per-workspace contract.
+    /// Native records bind to the pinned policy, gateway CA and lifecycle selection
+    /// and are capped by the operator's `--max-sandboxes`. The capacity is not part
+    /// of the binding, so raising it keeps retained intent. Legacy hosted records
+    /// retain their existing two-per-workspace contract.
     ///
     /// # Errors
     /// Rejects missing or unsafe native configuration and unreadable public CA files.
@@ -113,8 +118,12 @@ impl Store {
             .context("recovery directory is required")?;
         if config.runtime_profile == RuntimeProfile::Local {
             config.validate()?;
+            let capacity = config
+                .max_sandboxes
+                .context("native recovery requires --max-sandboxes")?;
             Ok(Self {
                 native_fingerprint: Some(native_fingerprint(config)?),
+                native_capacity: Some(usize::from(capacity)),
                 ..Self::new(root)
             })
         } else {
@@ -227,10 +236,10 @@ impl Store {
                 workspace_records += 1;
             }
         }
-        if self.native_fingerprint.is_some() {
+        if let Some(capacity) = self.native_capacity {
             ensure!(
-                existing || inventory.len() < 4,
-                "native node already has four retained sandboxes"
+                existing || inventory.len() < capacity,
+                "native node already retains its capacity of {capacity} sandboxes"
             );
         } else {
             ensure!(
@@ -282,10 +291,12 @@ impl Store {
             "recovery store operator configuration differs"
         );
         let inventory = self.inventory()?;
-        ensure!(
-            self.native_fingerprint.is_none() || inventory.len() <= 4,
-            "native recovery inventory exceeds four retained sandboxes"
-        );
+        if let Some(capacity) = self.native_capacity {
+            ensure!(
+                inventory.len() <= capacity,
+                "native recovery inventory exceeds the node capacity of {capacity} sandboxes"
+            );
+        }
         let mut retained = Vec::new();
         for (path, _) in inventory {
             let snapshot: Snapshot = serde_json::from_slice(&fs::read(&path)?)

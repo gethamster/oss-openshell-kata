@@ -23,6 +23,8 @@ SHIM = Path("/usr/local/bin/containerd-shim-kata-v2")
 CONTAINERD_CONFIG = Path("/etc/containerd/config.toml")
 CGROUP_CONTROLLERS = Path("/sys/fs/cgroup/cgroup.controllers")
 METADATA_BYTES = 1024**3
+# Operator-selected node capacity: retained guests admitted at once, stopped included.
+MAX_SANDBOXES_LIMIT = 64
 
 
 def profile(name):
@@ -32,6 +34,13 @@ def profile(name):
     if name == "foundry-build":
         return 32, 131072, 262144, 1280 * 1024**3
     raise ValueError("unknown operator resource profile")
+
+
+def capacity(value):
+    """Validate the operator node capacity in retained guests."""
+    if type(value) is not int or not 1 <= value <= MAX_SANDBOXES_LIMIT:
+        raise ValueError(f"max_sandboxes must be an integer between 1 and {MAX_SANDBOXES_LIMIT}")
+    return value
 
 
 def run(*args, timeout=120):
@@ -222,6 +231,7 @@ def verify(config):
     cpu, memory, disk, _ = profile(config['resource_profile'])
     if config['resources'] != {'vcpus': cpu, 'memory_mib': memory, 'disk_mib': disk}:
         raise ValueError("node resource configuration differs")
+    capacity(config.get('max_sandboxes'))
     reconstruct(config, create=False)
     if not Path('/dev/kvm').is_char_device() or not CGROUP_CONTROLLERS.is_file():
         raise ValueError("KVM and cgroups v2 are required")
@@ -246,6 +256,7 @@ def verify(config):
 
 def install(args):
     cpu, memory, disk, size = profile(args.resource_profile)
+    capacity(args.max_sandboxes)
     if CONTAINERD_CONFIG.exists() and not CONTAINERD_CONFIG.read_text().startswith('# Managed dedicated OpenShell Kata node\n'):
         raise ValueError('refusing to replace an unrelated containerd configuration')
     archive = args.archive.resolve(strict=True)
@@ -259,6 +270,7 @@ def install(args):
     config = {'version': 1, 'transport': 'linux-local', 'architecture': 'x86_64',
               'kata_version': '4.3.1', 'archive_sha256': KATA_SHA256,
               'resource_profile': args.resource_profile, 'operator': args.operator,
+              'max_sandboxes': args.max_sandboxes,
               'resources': {'vcpus': cpu, 'memory_mib': memory, 'disk_mib': disk},
               'pool': {'path': str(pool), 'bytes': size, 'zeroing': True}}
     workspace = args.binary_dir / 'kata-workspace'
@@ -273,10 +285,15 @@ def install(args):
     config['binaries_sha256'] = {binary: file_digest(args.binary_dir / binary) for binary in ('openshell-kata', 'kata-runtime', 'kata-network', 'kata-workspace', 'kata-operator')}
     if CONFIG.exists():
         retained = json.loads(CONFIG.read_text())
-        identity = {key: value for key, value in retained.items() if key != 'backing_files'}
-        if identity != config:
+        mutable = ('backing_files', 'max_sandboxes')
+        identity = {key: value for key, value in retained.items() if key not in mutable}
+        if identity != {key: value for key, value in config.items() if key not in mutable}:
             raise ValueError("existing node identity differs; migration requires explicit quiescence")
+        # Capacity is operator policy, not node identity: record a changed value in place.
         # A running node must not have its mapped executables or runtime replaced.
+        if retained.get('max_sandboxes') != args.max_sandboxes:
+            retained = dict(retained, max_sandboxes=args.max_sandboxes)
+            write(CONFIG, json.dumps(retained, sort_keys=True) + '\n')
         return verify(retained)
     if pool.exists() and any(pool.iterdir()):
         raise ValueError("refusing to initialize unowned persistent pool state")
@@ -364,9 +381,11 @@ def main():
     parser.add_argument('--pool-dir', type=Path)
     parser.add_argument('--resource-profile', choices=('local', 'foundry-build'), default='local')
     parser.add_argument('--operator', default='foundry')
+    parser.add_argument('--max-sandboxes', type=int,
+                        help=f'retained guests the node admits at once (1..{MAX_SANDBOXES_LIMIT})')
     args = parser.parse_args()
-    if not args.verify and not args.reconstruct and not all((args.archive, args.binary_dir, args.pool_dir)):
-        parser.error('installation requires --archive, --binary-dir and --pool-dir')
+    if not args.verify and not args.reconstruct and not all((args.archive, args.binary_dir, args.pool_dir, args.max_sandboxes)):
+        parser.error('installation requires --archive, --binary-dir, --pool-dir and --max-sandboxes')
     if platform.system() != 'Linux' or platform.machine() != 'x86_64' or os.geteuid() != 0:
         raise ValueError('native setup requires root on a dedicated x86_64 Linux node')
     for command in ('containerd', 'ctr', 'nerdctl', 'nft', 'ip', 'sshd', 'ssh-keygen', 'losetup', 'lsblk', 'findmnt', 'blockdev', 'dmsetup', 'fallocate', 'modprobe', 'tar', 'zstd', 'readelf', 'visudo', 'systemctl'):

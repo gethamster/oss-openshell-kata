@@ -66,6 +66,7 @@ fn setup() -> (tempfile::TempDir, StateDirectory, Settings) {
         state_dir: state.root().into(),
         node_binary: PathBuf::from("/does/not/exist"),
         image: None,
+        max_sandboxes: None,
     };
     (temp, state, settings)
 }
@@ -235,27 +236,75 @@ fn foundry_profile_is_explicit_and_drives_exact_guest_resources() {
     assert!(ResourceProfile::FoundryBuild.validate(&p).is_err());
 }
 
-#[tokio::test]
-async fn foundry_inventory_limit_rejects_fifth_retained_disk_before_node_access() {
-    let (temp, state, mut settings) = setup();
-    settings.resource_profile = openshell_kata::runtime::model::ResourceProfile::FoundryBuild;
-    for id in ["one", "two", "three", "four"] {
-        state.create(id).expect("retained guest");
-    }
+fn foundry_policy(temp: &tempfile::TempDir) -> PathBuf {
     let mut p = policy();
     p.resources.vcpus = 32;
     p.resources.memory_mib = 131072;
     p.resources.disk_mib = 262144;
     let path = temp.path().join("policy.json");
     std::fs::write(&path, serde_json::to_vec(&p).expect("policy bytes")).expect("write");
+    path
+}
+
+#[tokio::test]
+async fn foundry_inventory_limit_rejects_a_disk_at_capacity_before_node_access() {
+    let (temp, state, mut settings) = setup();
+    settings.resource_profile = openshell_kata::runtime::model::ResourceProfile::FoundryBuild;
+    settings.max_sandboxes = Some(3);
+    for id in ["one", "two", "three"] {
+        state.create(id).expect("retained guest");
+    }
+    let path = foundry_policy(&temp);
     let error = lifecycle::execute(
         &settings,
         Action::Create,
-        "five",
+        "four",
         Some(&path),
         Some("creation-nonce-0123456789"),
     )
     .await
     .expect_err("bounded retained inventory");
-    assert!(error.to_string().contains("four retained"), "{error:#}");
+    assert!(error.to_string().contains("capacity of 3"), "{error:#}");
+}
+
+#[tokio::test]
+async fn foundry_inventory_below_capacity_passes_the_limit_check() {
+    let (temp, state, mut settings) = setup();
+    settings.resource_profile = openshell_kata::runtime::model::ResourceProfile::FoundryBuild;
+    settings.max_sandboxes = Some(3);
+    for id in ["one", "two"] {
+        state.create(id).expect("retained guest");
+    }
+    let path = foundry_policy(&temp);
+    let error = lifecycle::execute(
+        &settings,
+        Action::Create,
+        "three",
+        Some(&path),
+        Some("creation-nonce-0123456789"),
+    )
+    .await
+    .expect_err("the fixture node is unreachable");
+    let message = format!("{error:#}");
+    assert!(
+        !message.contains("capacity") && message.contains("immutable operator image"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn foundry_requires_an_explicit_node_capacity() {
+    let (temp, _state, mut settings) = setup();
+    settings.resource_profile = openshell_kata::runtime::model::ResourceProfile::FoundryBuild;
+    let path = foundry_policy(&temp);
+    let error = lifecycle::execute(
+        &settings,
+        Action::Create,
+        "one",
+        Some(&path),
+        Some("creation-nonce-0123456789"),
+    )
+    .await
+    .expect_err("capacity is mandatory");
+    assert!(error.to_string().contains("node capacity"), "{error:#}");
 }
