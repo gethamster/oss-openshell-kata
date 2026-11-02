@@ -5,6 +5,33 @@ use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+pub(super) const DEFAULT_CONTROL_NAMESPACE: &str = "openshell-system";
+
+pub(super) fn configured_control_namespace() -> Result<String> {
+    let configured = std::env::var("OPENSHELL_KATA_CONTROL_NAMESPACE");
+    let value = match &configured {
+        Ok(value) => value.as_str(),
+        Err(std::env::VarError::NotPresent) => DEFAULT_CONTROL_NAMESPACE,
+        Err(_) => anyhow::bail!("operator control namespace must be UTF-8"),
+    };
+    validate_control_namespace(value)?;
+    Ok(value.to_owned())
+}
+
+pub(super) fn validate_control_namespace(value: &str) -> Result<()> {
+    ensure!(
+        !value.is_empty()
+            && value.len() <= 63
+            && value.as_bytes()[0].is_ascii_alphanumeric()
+            && value.as_bytes()[value.len() - 1].is_ascii_alphanumeric()
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+        "invalid operator control namespace"
+    );
+    Ok(())
+}
+
 pub(super) fn namespace(workspace: &str) -> Result<String> {
     crate::hosted::namespace(workspace)
 }
@@ -100,7 +127,12 @@ pub(super) fn selected(selector: &Value, labels: &Value) -> Result<bool> {
     }))
 }
 
-pub(super) fn validate_policies(policies: &[Value], labels: &Value) -> Result<()> {
+pub(super) fn validate_policies(
+    policies: &[Value],
+    labels: &Value,
+    control_namespace: &str,
+) -> Result<()> {
+    validate_control_namespace(control_namespace)?;
     let mut found = false;
     for policy in policies {
         let spec = &policy["spec"];
@@ -128,7 +160,7 @@ pub(super) fn validate_policies(policies: &[Value], labels: &Value) -> Result<()
                 .as_array()
                 .ok_or_else(|| anyhow::anyhow!("invalid ingress rules"))?
             {
-                validate_ingress(rule)?;
+                validate_ingress(rule, control_namespace)?;
             }
         }
     }
@@ -136,7 +168,7 @@ pub(super) fn validate_policies(policies: &[Value], labels: &Value) -> Result<()
     Ok(())
 }
 
-fn validate_ingress(rule: &Value) -> Result<()> {
+fn validate_ingress(rule: &Value, control_namespace: &str) -> Result<()> {
     let ports = rule["ports"]
         .as_array()
         .filter(|v| !v.is_empty())
@@ -157,7 +189,7 @@ fn validate_ingress(rule: &Value) -> Result<()> {
         let namespace = &source["namespaceSelector"];
         let pod = &source["podSelector"];
         ensure!(
-            namespace["matchLabels"] == json!({"kubernetes.io/metadata.name":"openshell-system"})
+            namespace["matchLabels"] == json!({"kubernetes.io/metadata.name":control_namespace})
                 && namespace
                     .get("matchExpressions")
                     .is_none_or(|v| v.as_array().is_some_and(Vec::is_empty))

@@ -27,12 +27,12 @@ pub(super) fn limits() -> Value {
     json!({"cpu":"2","memory":"4Gi","ephemeral-storage":"1Gi"})
 }
 
-pub(super) fn network_policy(name: &str, namespace: &str) -> Value {
+pub(super) fn network_policy(name: &str, namespace: &str, control_namespace: &str) -> Value {
     json!({"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
         "metadata":metadata(name,namespace),"spec":{
         "podSelector":{"matchLabels":{"sandbox-id":name}},"policyTypes":["Ingress","Egress"],"egress":[],
         "ingress":[{"from":[{"namespaceSelector":{"matchLabels":{
-            "kubernetes.io/metadata.name":"openshell-system"}},
+            "kubernetes.io/metadata.name":control_namespace}},
             "podSelector":{"matchLabels":{"platform.tryhamster.dev/role":"sandbox-control"}}}],
             "ports":[{"port":22,"protocol":"TCP"}]}]}})
 }
