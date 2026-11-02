@@ -177,6 +177,11 @@ impl Attachment {
             gateway_ip: Ipv4Addr::new(10, 205, third, fourth + 1),
         }
     }
+    /// Root-namespace name of the guest end of the veth pair before it moves into
+    /// the guest namespace; unique per attachment so concurrent creates never collide.
+    pub fn peer(&self) -> String {
+        format!("okp{}", &self.host_veth[3..])
+    }
     pub fn namespace_path(&self) -> String {
         format!("/run/netns/{}", self.netns)
     }
@@ -222,7 +227,8 @@ pub async fn create_attachment(
         &format!("{}/netns-owner.json", job_directory(id)),
     )
     .await?;
-    let peer = "okpeer0";
+    let peer = attachment.peer();
+    let peer = peer.as_str();
     node.node(&args(&[
         "ip",
         "link",

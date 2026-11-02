@@ -106,8 +106,9 @@ impl StateDirectory {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_str().context("non-UTF8 runtime state entry")?;
-            // Node and per-sandbox lifecycle locks are regular files, never retained guests.
-            if name == ".t" || name.starts_with(".lock") {
+            // Lifecycle locks, control sockets and a concurrent process's transient
+            // ownership probe (`.tmp*`) are never retained guests.
+            if name == ".t" || name.starts_with(".lock") || name.starts_with(".tmp") {
                 continue;
             }
             self.open_state(name)?;

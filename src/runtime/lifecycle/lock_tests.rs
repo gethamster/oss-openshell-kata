@@ -161,3 +161,102 @@ async fn reservations_exclude_retained_addresses_and_ports_from_new_plans() {
         .expect("plan");
     assert_ne!(planned.gateway_ip, held.gateway_ip);
 }
+
+fn plain_record(id: &str, nonce: &str, reserved: Reserved) -> Record {
+    serde_json::from_value(json!({
+        "creation_nonce": nonce,
+        "image": "registry.example/guest@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "route": {"sandbox_id":id,"host":"127.0.0.1","port":reserved.port,"username":"sandbox",
+                  "private_key_path":reserved.directory.join("client_key"),"known_hosts_path":reserved.directory.join("known_hosts")},
+        "policy": {"version":1,"profile":"docker-vm","resources":{"vcpus":1,"memory_mib":2048,"disk_mib":2048,"lifetime_secs":3600},"filesystem":{"host_mounts":"deny","transfer_max_bytes":268435456,"transfer_max_entries":4096},"network":{"tcp_allow":[]}},
+        "deadline": {"started_at_unix_secs":1,"expires_at_unix_secs":4000000000_u64},
+        "network": null,
+        "attachment": reserved.attachment,
+        "storage_id": "", "hypervisor_pid": 0, "watchdog_pid": 0, "cgroup_path": ""
+    }))
+    .expect("record")
+}
+
+#[tokio::test]
+async fn concurrent_creates_reserve_unique_node_resources_through_the_real_plan() {
+    let (files, state) = state();
+    let runner = files.path().join("node.py");
+    std::fs::write(&runner, include_str!("fake_ip_node.py")).expect("fake node");
+    std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o700)).expect("mode");
+    // Same creation nonce everywhere and colliding address seeds stress the plan.
+    let nonce = "creation-nonce-0123456789";
+    let root = state.root().to_owned();
+    // Another lifecycle process's transient ownership probe, seen mid-inventory.
+    std::fs::write(root.join(".tmpProbe1"), b"").expect("concurrent probe");
+    let creates: Vec<_> = (0..12)
+        .map(|index| {
+            let root = root.clone();
+            let runner = runner.clone();
+            tokio::spawn(async move {
+                // Each create is its own process: its own state handle and ownership probe.
+                let state = StateDirectory::new(&root)?;
+                let node =
+                    Node::with_transport("native", NodeTransport::LinuxLocal)?.test_runner(runner);
+                let id = format!("burst-{index}");
+                let record = reserve_create(
+                    &node,
+                    &state,
+                    &id,
+                    nonce,
+                    || Ok(()),
+                    |reserved| plain_record(&id, nonce, reserved),
+                )
+                .await?;
+                let fence =
+                    network::create_attachment(&node, &id, nonce, &record.attachment).await?;
+                anyhow::Ok((record, fence))
+            })
+        })
+        .collect();
+    let mut created = Vec::new();
+    for create in creates {
+        created.push(
+            create
+                .await
+                .expect("task")
+                .expect("no spurious create failure"),
+        );
+    }
+    let unique = |values: Vec<String>| {
+        let count = values.len();
+        let set: std::collections::BTreeSet<_> = values.into_iter().collect();
+        set.len() == count
+    };
+    assert!(unique(
+        created
+            .iter()
+            .map(|(r, _)| r.attachment.host_veth.clone())
+            .collect()
+    ));
+    assert!(unique(
+        created.iter().map(|(r, _)| r.attachment.peer()).collect()
+    ));
+    assert!(unique(
+        created
+            .iter()
+            .map(|(r, _)| r.attachment.netns.clone())
+            .collect()
+    ));
+    assert!(unique(
+        created
+            .iter()
+            .map(|(r, _)| r.attachment.gateway_ip.to_string())
+            .collect()
+    ));
+    assert!(unique(
+        created
+            .iter()
+            .map(|(r, _)| r.route.port.to_string())
+            .collect()
+    ));
+    assert!(unique(
+        created.iter().map(|(_, f)| f.ifindex.to_string()).collect()
+    ));
+    let retained = state.retained_ids().expect("consistent inventory");
+    assert_eq!(retained.len(), 12);
+}

@@ -477,7 +477,137 @@ async fn native_recovery_stops_before_inventory_and_requires_new_authenticated_s
             ..Default::default()
         }))
         .await?;
-    assert!(store.load(&config)?.is_empty());
+    assert!(store.load(&config)?.admitted.is_empty());
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn recovery_retires_sandboxes_the_new_operator_profile_no_longer_admits() -> anyhow::Result<()>
+{
+    use openshell_kata::{
+        profile::VmPolicy,
+        recovery::{Retained, Store},
+    };
+    let fixture = Fixture::new(vec!["fixture-main".into()]).await?;
+    let root = fixture.files.path();
+    let policy: VmPolicy = serde_json::from_value(
+        serde_json::json!({"version":1,"profile":"docker-vm","resources":{"vcpus":32,"memory_mib":131072,"disk_mib":262144,"lifetime_secs":3600},"filesystem":{"host_mounts":"deny","transfer_max_bytes":268435456,"transfer_max_entries":4096},"network":{"tcp_allow":[]}}),
+    )?;
+    let path = root.join("native-policy.json");
+    fs::write(&path, serde_json::to_vec(&policy)?)?;
+    let retired_image = IMAGE.replace("aaaa", "cccc");
+    let previous = Config {
+        runtime_profile: RuntimeProfile::Local,
+        vm_policy: Some(path),
+        guest_network_cidr: None,
+        additional_guest_images: vec![retired_image.clone()],
+        recovery_dir: Some(root.join("native-registry")),
+        max_sandboxes: Some(4),
+        ..(*fixture.runtime.config).clone()
+    };
+    let store = Store::for_config(&previous)?;
+    store.save(&Retained::new(
+        fixture.intent()?,
+        INSTANCE.into(),
+        "kept-generation".into(),
+    ))?;
+    let mut old = fixture.intent()?;
+    old.id = "retired-id".into();
+    old.spec
+        .as_mut()
+        .expect("spec")
+        .template
+        .as_mut()
+        .expect("template")
+        .image = retired_image;
+    store.save(&Retained::new(
+        old,
+        INSTANCE.into(),
+        "old-generation".into(),
+    ))?;
+    // The next release no longer admits the previous image.
+    let config = Arc::new(Config {
+        additional_guest_images: Vec::new(),
+        ..previous
+    });
+    let log = root.join("lifecycle.log");
+    executable(
+        &config.lifecycle,
+        &format!(
+            "#!/bin/sh\necho \"$1 $2\" >> '{}'\ncase \"$1\" in delete) exit 7 ;; esac\nprintf '{{}}'\n",
+            log.display()
+        ),
+    )?;
+    let failing = Driver::new(config.clone())?;
+    failing.recover().await?;
+    assert!(
+        Store::for_config(&config)?.load(&config)?.retired.len() == 1,
+        "a failed retirement keeps its record for the next recovery"
+    );
+    let ids = |driver: Driver| async move {
+        anyhow::Ok(
+            driver
+                .list_sandboxes(Request::new(c::ListSandboxesRequest {}))
+                .await?
+                .into_inner()
+                .sandboxes
+                .into_iter()
+                .map(|sandbox| sandbox.id)
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(ids(failing).await?, vec!["fixture-id".to_owned()]);
+
+    fs::remove_file(&log)?;
+    executable(
+        &config.lifecycle,
+        &format!(
+            "#!/bin/sh\necho \"$1 $2\" >> '{}'\nprintf '{{}}'\n",
+            log.display()
+        ),
+    )?;
+    let driver = Driver::new(config.clone())?;
+    driver.recover().await?;
+    let calls = fs::read_to_string(&log)?;
+    assert!(calls.contains("delete retired-id"), "{calls}");
+    assert!(calls.contains("stop fixture-id"), "{calls}");
+    assert!(!calls.contains("stop retired-id"), "{calls}");
+    assert_eq!(
+        driver
+            .get_sandbox(Request::new(c::GetSandboxRequest {
+                sandbox_id: "retired-id".into(),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("retired sandbox is gone")
+            .code(),
+        tonic::Code::NotFound
+    );
+    let recovered = Store::for_config(&config)?.load(&config)?;
+    assert!(recovered.retired.is_empty(), "retired record removed");
+    assert_eq!(recovered.admitted.len(), 1);
+    let mut watch = driver
+        .watch_sandboxes(Request::new(c::WatchSandboxesRequest {}))
+        .await?
+        .into_inner();
+    let mut deleted = false;
+    for _ in 0..4 {
+        let Ok(Some(event)) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), watch.next()).await
+        else {
+            break;
+        };
+        let event = event?;
+        if let Some(c::watch_sandboxes_event::Payload::Deleted(gone)) = event.payload {
+            deleted |= gone.sandbox_id == "retired-id";
+        }
+    }
+    assert!(
+        deleted,
+        "the gateway observes the retired sandbox as deleted"
+    );
+    assert_eq!(ids(driver).await?, vec!["fixture-id".to_owned()]);
     fixture.close().await;
     Ok(())
 }
