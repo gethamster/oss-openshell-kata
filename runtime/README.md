@@ -15,6 +15,10 @@ Set `OPENSHELL_KATA_RESOURCE_PROFILE=build` and select a distinct
 and a 96 GiB sparse disk. Its `--resource-profile build` guests have 16 vCPUs,
 48 GiB RAM and 32 GiB private disk, backed by a 64 GiB thin pool. Profile changes
 require a separate node; the setup script rejects an existing pool of a different size.
+The build node enables shared-memory transparent huge pages and opts the VMM
+into them. This keeps normal memory-cgroup accounting while avoiding unaligned
+4 KiB RAM mappings and their nested-translation overhead. It also disables
+OverlayFS redirect and metacopy defaults in the guest so Docker can use native diffs.
 
 ## Enforcement
 

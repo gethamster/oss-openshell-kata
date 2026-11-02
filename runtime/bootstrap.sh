@@ -20,6 +20,16 @@ sudo sed -i -E \
  -e "s/^default_maxmemory = .*/default_maxmemory = $memory/" \
  -e 's/^overhead_vcpus = .*/overhead_vcpus = 0/' \
  -e 's/^overhead_memory = .*/overhead_memory = 0/' "$config"
+if [[ "${1:-local}" == build ]]; then
+  # Transparent huge pages remain charged to the normal memory cgroup. Avoid
+  # hundreds of thousands of nested page-table entries for a large local VM.
+  printf 'w /sys/kernel/mm/transparent_hugepage/shmem_enabled - - - - advise\n' \
+    | sudo tee /etc/tmpfiles.d/openshell-kata-build-thp.conf >/dev/null
+  printf 'advise\n' | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled >/dev/null
+  sudo sed -i -e 's/^enable_hugepages = .*/enable_hugepages = true/' \
+    -e '/^enable_hugepages = true$/a hugepage_type = "thp"' \
+    -e 's/^kernel_params = "\(.*\)"$/kernel_params = "\1 overlay.redirect_dir=off overlay.metacopy=off"/' "$config"
+fi
 sudo ln -sfn configuration-dragonball.toml /opt/kata/share/defaults/kata-containers/runtime-rs/configuration.toml
 sudo ln -sfn /opt/kata/runtime-rs/bin/containerd-shim-kata-v2 /usr/local/bin/containerd-shim-kata-v2
 sudo modprobe vhost_vsock
