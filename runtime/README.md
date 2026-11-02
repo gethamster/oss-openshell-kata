@@ -120,7 +120,8 @@ the adapter refuse to start until guests are deleted. Set it to the
 Lifecycle operations on distinct guests run in parallel; operations on one
 guest stay ordered behind a per-guest lock. A create holds the node-wide lock
 only while it claims capacity, a private address and a tunnel port with its
-state record, never during boot. The adapter runs at most 16 provisioning and
+state record, never during boot. Link, peer and namespace names derive from the
+sandbox and its creation nonce, so concurrent creates never share one. The adapter runs at most 16 provisioning and
 16 revalidation lifecycle processes at once, and each execution deadline starts
 only when its slot is granted. Unchanged running guests are re-proven every 30
 seconds (policy changes apply at the next 5-second heartbeat). A missed deadline
@@ -200,6 +201,16 @@ confirmed stopped containerd tasks and the same private snapshot. Recovery
 creates new generation-owned attachment observations and packet-fence proofs,
 reserving all retained addresses before the adapter begins serving new requests.
 It preserves the original disk and expiration deadline.
+
+A retained sandbox the current operator profile no longer admits, for example
+because a release dropped its image from `--additional-guest-image` or changed
+the VM resources, is retired at recovery instead of failing the adapter. It is
+deleted like an explicit delete (guest, network fence, snapshot and recovery
+record), logged as `retiring retained sandbox the operator profile no longer
+admits`, and reported to the gateway as deleted so its owner re-places it. If
+that cleanup fails, the record is kept and retried at the next recovery.
+Integrity failures (operator binding, record identity, stored credentials,
+inventory bounds) still stop recovery.
 
 `sudo runtime/setup-linux.sh --verify` prints public JSON with
 `node_verified:true` after checking actual pool identity, zeroing, resource

@@ -141,6 +141,39 @@ fn reservations(state: &StateDirectory) -> Result<(Vec<std::net::Ipv4Addr>, Vec<
     Ok((addresses, ports))
 }
 
+/// Node resources claimed for one new guest under the node reservation lock.
+struct Reserved {
+    attachment: network::Attachment,
+    port: u16,
+    directory: PathBuf,
+}
+
+/// Claim capacity, a private address (with its link and namespace names) and a
+/// tunnel port, and persist the record before releasing the node lock, so a
+/// concurrent create always observes every earlier claim.
+async fn reserve_create(
+    node: &Node,
+    state: &StateDirectory,
+    id: &str,
+    nonce: &str,
+    check_capacity: impl FnOnce() -> Result<()>,
+    record: impl FnOnce(Reserved) -> Record,
+) -> Result<Record> {
+    let _reservation = LifecycleLock::acquire(state.root().join(".lock")).await?;
+    check_capacity()?;
+    let (reserved_addresses, reserved_ports) = reservations(state)?;
+    let attachment = network::plan_attachment(node, id, nonce, &reserved_addresses).await?;
+    let port = unreserved_port(&reserved_ports)?;
+    let directory = state.create(id)?;
+    let record = record(Reserved {
+        attachment,
+        port,
+        directory,
+    });
+    state.write(id, &record)?;
+    Ok(record)
+}
+
 fn unreserved_port(reserved: &[u16]) -> Result<u16> {
     for _ in 0..64 {
         let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
@@ -212,41 +245,34 @@ async fn execute_locked(
             bail!("container absence could not be confirmed before creation");
         }
         let node_boot = node_boot_id(&node).await?;
-        // Node-wide reservation: capacity, address and port are claimed atomically
-        // with the state record, then released before the long guest boot.
-        let reservation = LifecycleLock::acquire(state.root().join(".lock")).await?;
-        check_capacity()?;
-        let (reserved_addresses, reserved_ports) = reservations(state)?;
-        let attachment = network::plan_attachment(&node, id, nonce, &reserved_addresses).await?;
-        let port = unreserved_port(&reserved_ports)?;
-        let directory = state.create(id)?;
         let deadline = policy
             .resources
             .validate(&OperatorCeilings::default())?
             .deadline_from(now()?)?;
-        let mut record = Record {
-            creation_nonce: nonce.to_owned(),
-            node_boot_id: Some(node_boot),
-            image: model::selected_image(settings.image.as_deref())?,
-            route: Route {
-                sandbox_id: id.to_owned(),
-                host: "127.0.0.1".into(),
-                port,
-                username: "sandbox".into(),
-                private_key_path: directory.join("client_key"),
-                known_hosts_path: directory.join("known_hosts"),
-            },
-            policy,
-            deadline,
-            network: None,
-            attachment,
-            storage_id: String::new(),
-            hypervisor_pid: 0,
-            watchdog_pid: 0,
-            cgroup_path: String::new(),
-        };
-        state.write(id, &record)?;
-        drop(reservation);
+        let image = model::selected_image(settings.image.as_deref())?;
+        let mut record =
+            reserve_create(&node, state, id, nonce, check_capacity, |reserved| Record {
+                creation_nonce: nonce.to_owned(),
+                node_boot_id: Some(node_boot),
+                image,
+                route: Route {
+                    sandbox_id: id.to_owned(),
+                    host: "127.0.0.1".into(),
+                    port: reserved.port,
+                    username: "sandbox".into(),
+                    private_key_path: reserved.directory.join("client_key"),
+                    known_hosts_path: reserved.directory.join("known_hosts"),
+                },
+                policy,
+                deadline,
+                network: None,
+                attachment: reserved.attachment,
+                storage_id: String::new(),
+                hypervisor_pid: 0,
+                watchdog_pid: 0,
+                cgroup_path: String::new(),
+            })
+            .await?;
         let result = create(&node, state, settings, id, &record).await;
         match result {
             Ok(created) => {
