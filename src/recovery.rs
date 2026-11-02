@@ -96,7 +96,16 @@ struct Snapshot {
     generation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     operator_sha256: Option<String>,
+    /// Binding format: absent for legacy records whose fingerprint also covered the
+    /// VM policy and default guest image; [`BINDING`] binds node identity only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binding: Option<u32>,
 }
+
+/// Current recovery binding: node identity (gateway authority and CA, lifecycle,
+/// SSH, environment). Guest images and the VM policy are admission rules,
+/// re-validated per retained sandbox on every recovery.
+const BINDING: u32 = 2;
 
 /// Private atomic snapshots of operator-validated intent, never bearer tokens.
 #[derive(Clone)]
@@ -220,6 +229,7 @@ impl Store {
             runtime_identity: sanitized.runtime_identity,
             generation: sanitized.generation,
             operator_sha256: self.native_fingerprint.clone(),
+            binding: self.native_fingerprint.as_ref().map(|_| BINDING),
         };
         let encoded = serde_json::to_vec(&snapshot)?;
         ensure!(
@@ -232,8 +242,12 @@ impl Store {
         for (path, _) in &inventory {
             let stored: Snapshot = serde_json::from_slice(&fs::read(path)?)?;
             ensure!(stored.version == 1, "unsupported recovery snapshot version");
+            // A legacy native record awaits retirement by the next recovery.
             ensure!(
-                stored.operator_sha256 == self.native_fingerprint,
+                stored.operator_sha256 == self.native_fingerprint
+                    || (self.native_fingerprint.is_some()
+                        && stored.binding.is_none()
+                        && stored.operator_sha256.is_some()),
                 "recovery operator binding differs"
             );
             let sandbox = c::DriverSandbox::decode(stored.sandbox.as_slice())?;
@@ -297,10 +311,14 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("recovery store lock unavailable"))?;
         self.directory()?;
-        let expected_binding = if config.runtime_profile == RuntimeProfile::Local {
-            Some(native_fingerprint(config)?)
+        let (expected_binding, legacy_binding) = if config.runtime_profile == RuntimeProfile::Local
+        {
+            (
+                Some(native_fingerprint(config)?),
+                Some(legacy_native_fingerprint(config)?),
+            )
         } else {
-            None
+            (None, None)
         };
         ensure!(
             expected_binding == self.native_fingerprint,
@@ -324,8 +342,17 @@ impl Store {
                 snapshot.version == 1,
                 "unsupported recovery snapshot version"
             );
+            // Records bound to node identity must match it. A legacy native record also
+            // bound the VM policy and default image, so a mismatch cannot tell a policy
+            // change from an identity change: it is retired and re-placed, never reattached.
+            let legacy_mismatch = expected_binding.is_some()
+                && snapshot.binding.is_none()
+                && snapshot.operator_sha256.is_some()
+                && snapshot.operator_sha256 != legacy_binding;
             ensure!(
-                snapshot.operator_sha256 == expected_binding,
+                legacy_mismatch
+                    || (snapshot.binding.is_none() && snapshot.operator_sha256 == legacy_binding)
+                    || snapshot.operator_sha256 == expected_binding,
                 "recovery operator binding differs"
             );
             let sandbox = c::DriverSandbox::decode(snapshot.sandbox.as_slice())?;
@@ -345,7 +372,13 @@ impl Store {
                     || uuid::Uuid::parse_str(&snapshot.runtime_identity).is_ok(),
                 "invalid retained runtime identity"
             );
-            let admission = config.validate_request(&sandbox);
+            let admission = if legacy_mismatch {
+                Err(anyhow::anyhow!(
+                    "retained under an earlier operator binding"
+                ))
+            } else {
+                config.validate_request(&sandbox)
+            };
             let retained = Retained::new(sandbox, snapshot.runtime_identity, snapshot.generation);
             match admission {
                 Ok(()) => recovered.admitted.push(retained),
@@ -374,8 +407,30 @@ impl Store {
     }
 }
 
-/// Bind native recovery to public operator identity and enforcement configuration.
+/// Bind native recovery to the node's public operator identity.
 fn native_fingerprint(config: &Config) -> Result<String> {
+    let (identity, _) = native_binding(config)?;
+    let mut binding = identity;
+    binding["version"] = serde_json::json!(BINDING);
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&binding)?)
+    ))
+}
+
+/// The binding legacy records were written with: identity plus the VM policy
+/// digest and default guest image.
+fn legacy_native_fingerprint(config: &Config) -> Result<String> {
+    let (identity, policy_sha256) = native_binding(config)?;
+    let binding = serde_json::json!({"version":1,"profile":"native-enforced","policy_sha256":policy_sha256,"guest_image":config.guest_image,"gateway":identity["gateway"],"gateway_ca_sha256":identity["gateway_ca_sha256"],"lifecycle":identity["lifecycle"],"lifecycle_arg":identity["lifecycle_arg"],"ssh":identity["ssh"],"environment":identity["environment"]});
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&binding)?)
+    ))
+}
+
+/// Validated native configuration as its identity fields and VM policy digest.
+fn native_binding(config: &Config) -> Result<(serde_json::Value, String)> {
     config.validate()?;
     ensure!(
         config.runtime_profile == RuntimeProfile::Local && config.recovery_dir.is_some(),
@@ -408,9 +463,6 @@ fn native_fingerprint(config: &Config) -> Result<String> {
         )
     })
     .collect();
-    let binding = serde_json::json!({"version":1,"profile":"native-enforced","policy_sha256":policy.digest()?,"guest_image":config.guest_image,"gateway":config.gateway,"gateway_ca_sha256":format!("{:x}", Sha256::digest(&ca)),"lifecycle":config.lifecycle,"lifecycle_arg":config.lifecycle_arg,"ssh":config.ssh,"environment":environment});
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&binding)?)
-    ))
+    let identity = serde_json::json!({"profile":"native-enforced","gateway":config.gateway,"gateway_ca_sha256":format!("{:x}", Sha256::digest(&ca)),"lifecycle":config.lifecycle,"lifecycle_arg":config.lifecycle_arg,"ssh":config.ssh,"environment":environment});
+    Ok((identity, policy.digest()?))
 }

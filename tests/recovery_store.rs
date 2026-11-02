@@ -423,10 +423,59 @@ fn native_recovery_is_bound_scrubbed_and_caps_all_workspaces() -> anyhow::Result
         config.vm_policy.as_ref().expect("policy"),
         fs::read_to_string(config.vm_policy.as_ref().expect("policy"))?.replace("3600", "3601"),
     )?;
-    assert!(
-        Store::for_config(&config)?.load(&config).is_err(),
-        "policy changes need explicit migration"
+    let recovered = Store::for_config(&config)?.load(&config)?;
+    assert_eq!(
+        recovered.admitted.len() + recovered.retired.len(),
+        4,
+        "a VM policy change re-validates each retained sandbox instead of failing recovery"
     );
+    Ok(())
+}
+
+#[test]
+fn legacy_records_from_another_operator_binding_are_retired_not_fatal() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let config = native_config(root.path())?;
+    let store = Store::for_config(&config)?;
+    let mut current = intent();
+    current.sandbox.id = "current".into();
+    store.save(&current)?;
+    let mut legacy = intent();
+    legacy.sandbox.id = "legacy".into();
+    legacy.sandbox.workspace = "workspace-legacy".into();
+    store.save(&legacy)?;
+    // Rewrite one record as written by an earlier release: no binding format and a
+    // fingerprint that also covered a different VM policy.
+    let path = config
+        .recovery_dir
+        .as_ref()
+        .expect("recovery dir")
+        .join(format!(
+            "{:x}.json",
+            <sha2::Sha256 as sha2::Digest>::digest(b"legacy")
+        ));
+    let mut record: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+    record.as_object_mut().expect("record").remove("binding");
+    record["operator_sha256"] = serde_json::json!("0".repeat(64));
+    fs::write(&path, serde_json::to_vec(&record)?)?;
+    let recovered = Store::for_config(&config)?.load(&config)?;
+    let admitted: Vec<_> = recovered
+        .admitted
+        .iter()
+        .map(|r| r.sandbox.id.as_str())
+        .collect();
+    let retired: Vec<_> = recovered
+        .retired
+        .iter()
+        .map(|r| r.retained.sandbox.id.as_str())
+        .collect();
+    assert_eq!(admitted, vec!["current"]);
+    assert_eq!(retired, vec!["legacy"]);
+    // A pending legacy record does not block saving current intent.
+    let mut next = intent();
+    next.sandbox.id = "next".into();
+    next.sandbox.workspace = "workspace-next".into();
+    store.save(&next)?;
     Ok(())
 }
 
