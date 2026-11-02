@@ -74,7 +74,7 @@ fn atomic_snapshots_are_private_scrubbed_and_profile_bound() -> anyhow::Result<(
     assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o700);
     let file = snapshot(&path)?;
     assert_eq!(fs::metadata(&file)?.permissions().mode() & 0o777, 0o600);
-    let loaded = store.load(&config)?;
+    let loaded = store.load(&config)?.admitted;
     assert_eq!(loaded.len(), 1);
     assert!(
         loaded[0]
@@ -90,9 +90,10 @@ fn atomic_snapshots_are_private_scrubbed_and_profile_bound() -> anyhow::Result<(
         guest_image: Some(IMAGE.replace("aaaa", "bbbb")),
         ..config.clone()
     };
+    let rebound = store.load(&changed)?;
     assert!(
-        store.load(&changed).is_err(),
-        "operator image change cannot silently rebind retained storage"
+        rebound.admitted.is_empty() && rebound.retired.len() == 1,
+        "operator image change retires retained storage instead of rebinding it"
     );
     store.save(&Retained::new(
         loaded[0].sandbox.clone(),
@@ -172,7 +173,7 @@ fn oversized_intent_and_third_workspace_reservation_are_rejected_before_commit()
         "serialized JSON must fit the same limit as restart loading"
     );
     assert!(
-        store.load(&config)?[0]
+        store.load(&config)?.admitted[0]
             .sandbox
             .spec
             .as_ref()
@@ -196,7 +197,7 @@ fn oversized_intent_and_third_workspace_reservation_are_rejected_before_commit()
     })?;
     store.remove("second")?;
     store.save(&third)?;
-    assert_eq!(store.load(&config)?.len(), 2);
+    assert_eq!(store.load(&config)?.admitted.len(), 2);
     Ok(())
 }
 
@@ -216,7 +217,7 @@ fn recovery_inventory_has_bounded_record_count_and_total_bytes() -> anyhow::Resu
             }
         }
         let store = Store::new(directory);
-        let loaded = store.load(&config);
+        let loaded = store.load(&config).map(|recovered| recovered.admitted);
         assert!(loaded.is_err(), "inventory must be bounded before decoding");
         assert!(
             loaded
@@ -255,7 +256,7 @@ fn concurrent_reservations_cannot_exceed_workspace_inventory() -> anyhow::Result
         .filter(|saved| *saved)
         .count();
     assert_eq!(saved, 2);
-    assert_eq!(store.load(&configuration)?.len(), 2);
+    assert_eq!(store.load(&configuration)?.admitted.len(), 2);
     Ok(())
 }
 
@@ -300,7 +301,7 @@ fn native_capacity_follows_the_operator_setting() -> anyhow::Result<()> {
     let refused = save_native(&store, 48).expect_err("a sandbox beyond capacity is refused");
     assert!(refused.to_string().contains("capacity of 48"), "{refused}");
     save_native(&store, 0).expect("an existing reservation can be rewritten at capacity");
-    assert_eq!(store.load(&config)?.len(), 48);
+    assert_eq!(store.load(&config)?.admitted.len(), 48);
 
     let lowered = Config {
         max_sandboxes: Some(8),
@@ -316,7 +317,7 @@ fn native_capacity_follows_the_operator_setting() -> anyhow::Result<()> {
     };
     let raised_store = Store::for_config(&raised)?;
     assert_eq!(
-        raised_store.load(&raised)?.len(),
+        raised_store.load(&raised)?.admitted.len(),
         48,
         "raising capacity keeps retained intent bound"
     );
@@ -385,7 +386,7 @@ fn native_recovery_is_bound_scrubbed_and_caps_all_workspaces() -> anyhow::Result
         retained.sandbox.workspace = format!("workspace-{index}");
         store.save(&retained)?;
     }
-    let loaded = store.load(&config)?;
+    let loaded = store.load(&config)?.admitted;
     assert_eq!(loaded.len(), 4);
     assert!(loaded.iter().all(|r| {
         r.sandbox
@@ -485,7 +486,7 @@ fn native_concurrent_reservations_cannot_exceed_capacity() -> anyhow::Result<()>
         .filter(|saved| *saved)
         .count();
     assert_eq!(saved, 4);
-    assert_eq!(store.load(&configuration)?.len(), 4);
+    assert_eq!(store.load(&configuration)?.admitted.len(), 4);
     Ok(())
 }
 
@@ -505,9 +506,18 @@ fn native_recovery_rejects_changed_public_ca_and_invalid_retained_shape() -> any
         .expect("template")
         .image = IMAGE.replace("aaaa", "bbbb");
     store.save(&invalid)?;
+    let recovered = store.load(&config)?;
     assert!(
-        store.load(&config).is_err(),
-        "retained image must still match the pinned operator image"
+        recovered.admitted.is_empty(),
+        "a retained image outside the operator profile is never restarted"
+    );
+    assert_eq!(recovered.retired.len(), 1);
+    assert!(
+        recovered.retired[0]
+            .reason
+            .contains("guest image differs from operator profile"),
+        "{}",
+        recovered.retired[0].reason
     );
     store.save(&intent())?;
     fs::write(&config.gateway_ca, b"replacement-public-ca")?;
@@ -517,5 +527,70 @@ fn native_recovery_rejects_changed_public_ca_and_invalid_retained_shape() -> any
     );
     fs::write(&config.gateway_ca, b"")?;
     assert!(Store::for_config(&config).is_err());
+    Ok(())
+}
+
+fn with_template(id: &str, edit: impl FnOnce(&mut c::DriverSandboxTemplate)) -> Retained {
+    let mut retained = intent();
+    retained.sandbox.id = id.into();
+    retained.sandbox.workspace = format!("workspace-{id}");
+    edit(
+        retained
+            .sandbox
+            .spec
+            .as_mut()
+            .expect("spec")
+            .template
+            .as_mut()
+            .expect("template"),
+    );
+    retained
+}
+
+#[test]
+fn records_the_operator_profile_no_longer_admits_are_retired_not_fatal() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let previous_image = IMAGE.replace("aaaa", "cccc");
+    let previous = Config {
+        additional_guest_images: vec![previous_image.clone()],
+        ..native_config(root.path())?
+    };
+    let store = Store::for_config(&previous)?;
+    store.save(&with_template("kept", |_| {}))?;
+    store.save(&with_template("old-image", |template| {
+        template.image = previous_image.clone();
+    }))?;
+    store.save(&with_template("old-size", |template| {
+        template.resources = Some(c::DriverResourceRequirements {
+            cpu_request: "16".into(),
+            ..Default::default()
+        });
+    }))?;
+    // The next release drops the previous image from the allowlist.
+    let current = Config {
+        additional_guest_images: Vec::new(),
+        ..previous
+    };
+    let recovered = Store::for_config(&current)?.load(&current)?;
+    let admitted: Vec<_> = recovered
+        .admitted
+        .iter()
+        .map(|r| r.sandbox.id.as_str())
+        .collect();
+    let mut retired: Vec<_> = recovered
+        .retired
+        .iter()
+        .map(|r| r.retained.sandbox.id.as_str())
+        .collect();
+    retired.sort_unstable();
+    assert_eq!(admitted, vec!["kept"]);
+    assert_eq!(retired, vec!["old-image", "old-size"]);
+    assert!(recovered.retired.iter().all(|r| {
+        r.retained
+            .sandbox
+            .spec
+            .as_ref()
+            .is_some_and(|spec| spec.launch_authentication.is_empty())
+    }));
     Ok(())
 }

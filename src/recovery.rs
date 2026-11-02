@@ -71,6 +71,22 @@ impl Retained {
     }
 }
 
+/// A retained sandbox the current operator profile no longer admits, such as one
+/// whose image left the allowlist in a release. It is retired, not restarted.
+pub struct Retired {
+    pub retained: Retained,
+    pub reason: String,
+}
+
+/// Recovery inventory split by admission under the current operator profile.
+///
+/// Integrity failures (binding, identity, credentials, bounds) still fail the
+/// whole load; only a per-record admission mismatch retires one record.
+pub struct Recovered {
+    pub admitted: Vec<Retained>,
+    pub retired: Vec<Retired>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Snapshot {
@@ -275,7 +291,7 @@ impl Store {
         Ok(())
     }
 
-    pub fn load(&self, config: &Config) -> Result<Vec<Retained>> {
+    pub fn load(&self, config: &Config) -> Result<Recovered> {
         let _guard = self
             .mutation
             .lock()
@@ -297,7 +313,10 @@ impl Store {
                 "native recovery inventory exceeds the node capacity of {capacity} sandboxes"
             );
         }
-        let mut retained = Vec::new();
+        let mut recovered = Recovered {
+            admitted: Vec::new(),
+            retired: Vec::new(),
+        };
         for (path, _) in inventory {
             let snapshot: Snapshot = serde_json::from_slice(&fs::read(&path)?)
                 .context("decoding sandbox recovery intent")?;
@@ -321,19 +340,22 @@ impl Store {
                 self.path(&sandbox.id)? == path,
                 "recovery snapshot identity differs from filename"
             );
-            config.validate_request(&sandbox)?;
             ensure!(
                 snapshot.runtime_identity.is_empty()
                     || uuid::Uuid::parse_str(&snapshot.runtime_identity).is_ok(),
                 "invalid retained runtime identity"
             );
-            retained.push(Retained::new(
-                sandbox,
-                snapshot.runtime_identity,
-                snapshot.generation,
-            ));
+            let admission = config.validate_request(&sandbox);
+            let retained = Retained::new(sandbox, snapshot.runtime_identity, snapshot.generation);
+            match admission {
+                Ok(()) => recovered.admitted.push(retained),
+                Err(error) => recovered.retired.push(Retired {
+                    retained,
+                    reason: format!("{error:#}"),
+                }),
+            }
         }
-        Ok(retained)
+        Ok(recovered)
     }
 
     pub fn remove(&self, id: &str) -> Result<()> {
