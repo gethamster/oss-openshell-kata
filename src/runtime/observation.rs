@@ -1,5 +1,6 @@
 //! Host observations of hypervisor identity, resource limits, and capped storage.
 use super::command::Node;
+use super::model::{LOCAL_GUEST_MEMORY_BYTES, LOCAL_HOST_MEMORY_BYTES};
 use crate::profile::VmPolicy;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -47,11 +48,19 @@ pub(super) async fn host_process(node: &Node, id: &str, native: &Value) -> Resul
             let memory = node
                 .node(&args(&["cat", &format!("{cgroup}/memory.max")]))
                 .await?;
+            let guest_memory = node
+                .node(&args(&["cat", &format!("{cgroup}/guest/memory.max")]))
+                .await?;
             let cpu = node
                 .node(&args(&["cat", &format!("{cgroup}/cpu.max")]))
                 .await?;
-            if String::from_utf8(memory.stdout)?.trim() != "2147483648"
-                || String::from_utf8(cpu.stdout)?.trim() != "100000 100000"
+            if !valid_memory_limits(
+                native
+                    .pointer("/Spec/linux/resources/memory/limit")
+                    .and_then(Value::as_u64),
+                String::from_utf8(memory.stdout)?.trim(),
+                String::from_utf8(guest_memory.stdout)?.trim(),
+            ) || String::from_utf8(cpu.stdout)?.trim() != "100000 100000"
             {
                 bail!("host resource limits differ from admitted profile");
             }
@@ -76,6 +85,12 @@ pub(super) async fn host_process(node: &Node, id: &str, native: &Value) -> Resul
         }
     }
     bail!("running official Rust Kata hypervisor was not found")
+}
+
+fn valid_memory_limits(guest_bytes: Option<u64>, parent: &str, shim: &str) -> bool {
+    guest_bytes == Some(LOCAL_GUEST_MEMORY_BYTES)
+        && parent.parse::<u64>().ok() == Some(LOCAL_HOST_MEMORY_BYTES)
+        && shim.parse::<u64>().ok() == Some(LOCAL_HOST_MEMORY_BYTES)
 }
 
 pub(super) async fn verify_storage(node: &Node, native: &Value, policy: &VmPolicy) -> Result<()> {
@@ -157,4 +172,30 @@ pub(super) async fn storage_device(node: &Node, native: &Value) -> Result<String
         .find(|part| part.starts_with("/dev/mapper/openshell-kata-pool-"))
         .map(str::to_owned)
         .context("snapshot has no owned block device")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_memory_limits;
+
+    #[test]
+    fn guest_memory_and_both_host_limits_are_verified_separately() {
+        let guest = Some(2_147_483_648);
+        assert!(valid_memory_limits(guest, "2415919104", "2415919104"));
+        for (parent, shim) in [
+            ("2147483648", "2415919104"),
+            ("2415919104", "2147483648"),
+            ("max", "2415919104"),
+            ("2415919104", "max"),
+            ("2415919105", "2415919104"),
+        ] {
+            assert!(!valid_memory_limits(guest, parent, shim));
+        }
+        assert!(!valid_memory_limits(
+            Some(2_415_919_104),
+            "2415919104",
+            "2415919104"
+        ));
+        assert!(!valid_memory_limits(None, "2415919104", "2415919104"));
+    }
 }

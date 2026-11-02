@@ -231,7 +231,10 @@ must not claim that the file-transfer quota prevents all data export.
 ## Process and resource enforcement
 
 Enforce the configured vCPU and memory allocation outside the guest. Account
-for host VMM overhead separately from the guest's requested memory. The host
+for host VMM overhead separately from the guest's requested memory. The local
+profile grants 2048 MiB of guest RAM and caps both the parent and shim cgroups
+at 2304 MiB, including a fixed 256 MiB host runtime allowance. The allowance
+does not enlarge guest RAM; unlimited or mismatched host caps are rejected. The host
 must reserve sufficient capacity for concurrent guests and trusted services;
 per-guest limits do not justify unlimited aggregate admission.
 
