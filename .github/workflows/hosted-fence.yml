@@ -1,0 +1,30 @@
+name: Hosted fence artifact
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hosted-fence:
+    runs-on: oss-ubuntu24-x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+      - name: Install object build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y zstd
+      - name: Build pinned Rust packet fence
+        run: |
+          rustc +1.98.0 --edition=2024 scripts/build_hosted_fence.rs -o /tmp/build-hosted-fence
+          /tmp/build-hosted-fence --output-dir /tmp/fence-artifacts
+      - name: Preserve build identity
+        uses: actions/upload-artifact@v4
+        with:
+          name: hosted-fence-object
+          path: /tmp/fence-artifacts/
