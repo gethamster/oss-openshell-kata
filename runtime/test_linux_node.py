@@ -19,6 +19,13 @@ class NativeNodeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             node.profile("caller-unlimited")
 
+    def test_capacity_is_bounded_integer(self):
+        for accepted in (1, 48, 64):
+            self.assertEqual(node.capacity(accepted), accepted)
+        for rejected in (None, 0, 65, -1, True, 4.0, '48'):
+            with self.assertRaises(ValueError):
+                node.capacity(rejected)
+
     def test_runtime_config_disables_shared_files_and_bounds_hardware(self):
         original = '[hypervisor.dragonball]\ndefault_vcpus = 1\ndefault_maxvcpus = 1\ndefault_memory = 2048\ndefault_maxmemory = 2048\nshared_fs = "virtio-fs"\nblock_device_driver = "virtio-blk-pci"\n'
         result = node.runtime_configuration(original, "foundry-build")
@@ -67,6 +74,7 @@ class NativeSetupIntegrationTests(unittest.TestCase):
         from types import SimpleNamespace
         from unittest.mock import patch
         import hashlib
+        import json
         import os
         import subprocess
 
@@ -144,7 +152,7 @@ class NativeSetupIntegrationTests(unittest.TestCase):
                 return ''
 
             stack.enter_context(patch.object(node, 'run', command))
-            args = SimpleNamespace(archive=archive, binary_dir=binaries, pool_dir=root / 'pool', resource_profile='foundry-build', operator='foundry')
+            args = SimpleNamespace(archive=archive, binary_dir=binaries, pool_dir=root / 'pool', resource_profile='foundry-build', operator='foundry', max_sandboxes=4)
             args.pool_dir.mkdir()
             orphan = args.pool_dir / 'metadata'
             orphan.write_bytes(b'RETAINED-UNKNOWN-STATE')
@@ -155,6 +163,23 @@ class NativeSetupIntegrationTests(unittest.TestCase):
             orphan.unlink()
             evidence = node.install(args)
             self.assertTrue(evidence['node_verified'])
+            self.assertEqual(evidence['max_sandboxes'], 4)
+            # An existing node adopts a new capacity in place without reinstalling.
+            args.max_sandboxes = 48
+            raised = node.install(args)
+            self.assertEqual(raised['max_sandboxes'], 48)
+            self.assertEqual(json.loads(config.read_text())['max_sandboxes'], 48)
+            for invalid in (0, 65):
+                args.max_sandboxes = invalid
+                with self.assertRaisesRegex(ValueError, 'max_sandboxes'):
+                    node.install(args)
+            args.max_sandboxes = 48
+            # A node configuration written before capacity was explicit must be upgraded.
+            legacy = {key: value for key, value in raised.items() if key not in ('max_sandboxes', 'node_verified')}
+            with self.assertRaisesRegex(ValueError, 'max_sandboxes'):
+                node.verify(legacy)
+            self.assertTrue(node.verify(dict(legacy, max_sandboxes=48))['node_verified'])
+            evidence = raised
             data = args.pool_dir / 'data'
             with data.open('r+b') as stream:
                 stream.write(b'RETAINED')
@@ -197,7 +222,7 @@ class NativeSetupIntegrationTests(unittest.TestCase):
             existing.write_text('version = 2\n# unrelated')
             with patch.object(node, 'CONTAINERD_CONFIG', existing), patch.object(node, 'run') as command:
                 with self.assertRaisesRegex(ValueError, 'unrelated'):
-                    node.install(SimpleNamespace(resource_profile='foundry-build'))
+                    node.install(SimpleNamespace(resource_profile='foundry-build', max_sandboxes=48))
                 command.assert_not_called()
             self.assertEqual(existing.read_text(), 'version = 2\n# unrelated')
 

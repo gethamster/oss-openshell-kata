@@ -48,6 +48,8 @@ pub struct Settings {
     pub state_dir: PathBuf,
     pub node_binary: PathBuf,
     pub image: Option<String>,
+    /// Operator node capacity in retained guests, stopped guests included.
+    pub max_sandboxes: Option<u8>,
 }
 
 /// A persistent expiry job, run outside the guest and outside the adapter process.
@@ -104,13 +106,21 @@ pub async fn execute(
         if exists {
             bail!("sandbox state already exists");
         }
-        if settings.resource_profile == model::ResourceProfile::FoundryBuild {
-            if state.retained_count()? >= 4 {
-                bail!("Foundry permits at most four retained guest disks");
+        let capacity = match (settings.resource_profile, settings.max_sandboxes) {
+            (model::ResourceProfile::FoundryBuild, None) => {
+                bail!("Foundry requires an explicit operator node capacity")
             }
-            if settings.image.is_none() {
-                bail!("Foundry requires an explicit immutable operator image");
-            }
+            (_, capacity) => capacity,
+        };
+        if let Some(capacity) = capacity
+            && state.retained_count()? >= usize::from(capacity)
+        {
+            bail!("node already retains its capacity of {capacity} guest disks");
+        }
+        if settings.resource_profile == model::ResourceProfile::FoundryBuild
+            && settings.image.is_none()
+        {
+            bail!("Foundry requires an explicit immutable operator image");
         }
         let raw = node
             .raw_nerdctl(&args(&["inspect", "--mode=native", id]))

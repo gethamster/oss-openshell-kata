@@ -383,6 +383,7 @@ async fn native_recovery_stops_before_inventory_and_requires_new_authenticated_s
         guest_network_cidr: None,
         additional_guest_images: Vec::new(),
         recovery_dir: Some(root.join("native-registry")),
+        max_sandboxes: Some(4),
         ..(*fixture.runtime.config).clone()
     });
     let mut route: serde_json::Value = serde_json::from_slice(&fs::read(root.join("route.json"))?)?;

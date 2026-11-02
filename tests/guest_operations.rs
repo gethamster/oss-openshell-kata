@@ -28,6 +28,7 @@ fn config(root: &Path, profile: RuntimeProfile) -> Config {
         guest_network_cidr: Some("10.176.0.0/16".into()),
         additional_guest_images: Vec::new(),
         recovery_dir: None,
+        max_sandboxes: None,
     }
 }
 fn route(root: &Path) -> serde_json::Value {

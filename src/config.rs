@@ -30,6 +30,9 @@ impl fmt::Display for SandboxId {
     }
 }
 
+/// Upper bound on the operator-selected native node capacity (`--max-sandboxes`).
+pub const MAX_SANDBOXES_LIMIT: u8 = 64;
+
 /// Operator configuration; no workload input can select host commands.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum RuntimeProfile {
@@ -73,6 +76,11 @@ pub struct Config {
     /// Private durable metadata directory; never stores launch credentials.
     #[arg(long)]
     pub recovery_dir: Option<PathBuf>,
+    /// Operator capacity of the native node: the most retained sandboxes, stopped
+    /// guests included, it admits at once. Required with native recovery. The
+    /// lifecycle reads the same `OPENSHELL_KATA_MAX_SANDBOXES` service setting.
+    #[arg(long, env = "OPENSHELL_KATA_MAX_SANDBOXES", value_parser = clap::value_parser!(u8).range(1..=i64::from(MAX_SANDBOXES_LIMIT)))]
+    pub max_sandboxes: Option<u8>,
 }
 impl Config {
     /// The operator-admitted guest images: the default image first, then any additional ones.
@@ -155,6 +163,20 @@ impl Config {
             bail!(
                 "native recovery requires an absolute directory, enforced policy and pinned guest image"
             );
+        }
+        let native_recovery =
+            self.runtime_profile == RuntimeProfile::Local && self.recovery_dir.is_some();
+        match self.max_sandboxes {
+            None if native_recovery => {
+                bail!("native recovery requires an explicit --max-sandboxes node capacity")
+            }
+            Some(_) if !native_recovery => {
+                bail!("--max-sandboxes applies only to the native local runtime with recovery")
+            }
+            Some(capacity) if !(1..=MAX_SANDBOXES_LIMIT).contains(&capacity) => {
+                bail!("--max-sandboxes must be between 1 and {MAX_SANDBOXES_LIMIT}")
+            }
+            _ => {}
         }
         if self.runtime_profile == RuntimeProfile::Kubernetes {
             if self

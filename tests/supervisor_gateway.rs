@@ -192,6 +192,7 @@ impl Fixture {
             guest_network_cidr: Some("10.176.0.0/16".into()),
             additional_guest_images: Vec::new(),
             recovery_dir: None,
+            max_sandboxes: None,
         });
         let authentication = serde_json::to_vec(
             &serde_json::json!({"supervisor":{"gateway_token":"initial-credential","ssh_host_private_key":fs::read_to_string(root.join("ssh-key"))?}}),

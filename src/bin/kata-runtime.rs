@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use openshell_kata::config::MAX_SANDBOXES_LIMIT;
 use openshell_kata::runtime::{
     command::NodeTransport,
     lifecycle::{self, Settings, WatchJob},
@@ -31,6 +32,13 @@ struct Arguments {
     /// Operator-selected immutable guest image; never a workload override.
     #[arg(long)]
     image: Option<String>,
+    /// Operator node capacity in retained guests; required by `foundry-build`.
+    #[arg(
+        long,
+        env = "OPENSHELL_KATA_MAX_SANDBOXES",
+        value_parser = clap::value_parser!(u8).range(1..=i64::from(MAX_SANDBOXES_LIMIT))
+    )]
+    max_sandboxes: Option<u8>,
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -93,6 +101,7 @@ async fn main() -> Result<()> {
         image: args
             .image
             .or_else(|| std::env::var("OPENSHELL_KATA_GUEST_IMAGE").ok()),
+        max_sandboxes: args.max_sandboxes,
     };
     let action: Action = args.action.parse().context("invalid runtime action")?;
     let value = lifecycle::execute(

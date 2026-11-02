@@ -56,6 +56,7 @@ fn fixture() -> (
         state_dir: state.root().to_owned(),
         node_binary: "/opt/openshell-kata/kata-runtime".into(),
         image: Some(image.into()),
+        max_sandboxes: Some(48),
     };
     let node = Node::with_transport("native", NodeTransport::LinuxLocal)
         .expect("native node")
