@@ -93,7 +93,11 @@ fn broker_additive_policy_cannot_allow_nodes_or_extra_resolvers() {
 }
 #[test]
 fn isolated_guest_profile_remains_deny_all() {
-    let p = manifest::network_policy("sandbox", "sandbox-tenant");
+    let p = manifest::network_policy(
+        "sandbox",
+        "sandbox-tenant",
+        super::policy::DEFAULT_CONTROL_NAMESPACE,
+    );
     assert_eq!(p["spec"]["egress"], json!([]));
     assert_eq!(
         manifest::labels("sandbox")["platform.tryhamster.dev/network-profile"],

@@ -50,7 +50,7 @@ pub(super) fn configmap(
     )
 }
 pub(super) fn guest_policy(name: &str, namespace: &str, binding: &Binding) -> Value {
-    let mut p = manifest::network_policy(name, namespace);
+    let mut p = manifest::network_policy(name, namespace, super::policy::DEFAULT_CONTROL_NAMESPACE);
     p["metadata"]["labels"] = guest_labels(name, binding);
     p["spec"]["egress"] = json!([{"to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":binding.namespace}},"podSelector":{"matchLabels":labels(binding)}}],"ports":[{"protocol":"TCP","port":3128}]}]);
     p

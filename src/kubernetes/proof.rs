@@ -39,6 +39,7 @@ pub(super) async fn verify_with_nonce(
     network: &ipnet::IpNet,
     nonce: &str,
 ) -> Result<(State, Value)> {
+    let control_namespace = policy::configured_control_namespace()?;
     super::broker_config::canonical_uuid(nonce)?;
     let namespace = client
         .required("namespace", Some(&state.namespace), None)
@@ -74,6 +75,7 @@ pub(super) async fn verify_with_nonce(
             policies,
         },
         network,
+        &control_namespace,
     )?;
     if let Some(binding) = &state.broker {
         ensure!(
@@ -128,6 +130,7 @@ pub(super) fn validate(
     storage_class: &str,
     observed: &Observations,
     network: &ipnet::IpNet,
+    control_namespace: &str,
 ) -> Result<(State, Value)> {
     lease::validate_binding(&observed.pod, state)?;
     let expires = lease::expires_at(Some(state.expires_at), 86400, lease::now()?)?;
@@ -240,7 +243,11 @@ pub(super) fn validate(
                 == "isolated",
             "guest profile changed"
         );
-        policy::validate_policies(&observed.policies, &observed.pod["metadata"]["labels"])?;
+        policy::validate_policies(
+            &observed.policies,
+            &observed.pod["metadata"]["labels"],
+            control_namespace,
+        )?;
     }
     let identity = observed.pod["metadata"]["uid"]
         .as_str()

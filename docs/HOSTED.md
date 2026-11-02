@@ -16,6 +16,12 @@ name. There is no implicit provider default or provider-name allowlist. The live
 PVC must exactly match the selected class and private volume shape. Each provider's
 actual storage behavior still needs qualification. Tenants cannot choose these settings.
 
+`OPENSHELL_KATA_CONTROL_NAMESPACE` selects the single trusted control namespace
+for the isolated profile (default `openshell-system`). It must be a Kubernetes
+DNS label. Generated guest policies and create-time and ongoing verification
+require that exact namespace and the `sandbox-control` role; the setting never
+adds another allowed principal and is not accepted from workload requests.
+
 The launcher derives `sandbox-<workspace>` from gateway-owned metadata and
 checks existing namespace labels. It never creates namespaces. Each sandbox
 has a Kata Pod, a private 19 GiB RWO PVC, an SSH Secret and selecting network

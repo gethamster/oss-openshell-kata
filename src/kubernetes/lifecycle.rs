@@ -29,6 +29,7 @@ pub(super) async fn create(
     folder: &Path,
     launch: &Launch<'_>,
 ) -> Result<Value> {
+    let control_namespace = policy::configured_control_namespace()?;
     policy::validate_image(launch.image)?;
     uuid::Uuid::parse_str(launch.nonce)?;
     let namespace = policy::namespace(launch.workspace)?;
@@ -115,7 +116,7 @@ pub(super) async fn create(
     store.known_hosts(launch.sandbox, "placeholder", &host_key)?;
     let state = broker::create(client, store, &state).await?;
     let network_policy = state.broker.as_ref().map_or_else(
-        || manifest::network_policy(&name, &namespace),
+        || manifest::network_policy(&name, &namespace, &control_namespace),
         |binding| broker_manifest::guest_policy(&name, &namespace, binding),
     );
     client.apply(&network_policy).await?;
@@ -140,7 +141,7 @@ pub(super) async fn create(
             binding,
         )?;
     } else {
-        policy::validate_policies(items, &manifest::labels(&name))?;
+        policy::validate_policies(items, &manifest::labels(&name), &control_namespace)?;
     }
     let mut pod = broker_manifest::guest_pod(&state);
     pod["metadata"]["annotations"] = lease::annotations(launch.sandbox, launch.nonce, expires);

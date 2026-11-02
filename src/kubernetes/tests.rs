@@ -44,7 +44,11 @@ fn observations(state: &model::State) -> proof::Observations {
         pvc: manifest::pvc(&state.name, &state.namespace, "standard-rwo"),
         node: json!({"metadata":{"labels":{"pool":"kata-workers","katacontainers.io/kata-runtime":"true"}}}),
         runtime: json!({"handler":manifest::RUNTIME,"metadata":{"annotations":{"katacontainers.io/kata-version":"4.3.1"}}}),
-        policies: vec![manifest::network_policy(&state.name, &state.namespace)],
+        policies: vec![manifest::network_policy(
+            &state.name,
+            &state.namespace,
+            policy::DEFAULT_CONTROL_NAMESPACE,
+        )],
     }
 }
 #[test]
@@ -100,15 +104,32 @@ fn storage_profile_is_operator_selected_and_verified() {
     assert!(policy::validate_storage_class(&"a".repeat(64)).is_err());
     let state = state();
     let observed = observations(&state);
-    assert!(proof::validate(&state, "kata-regional-rwo", &observed, &network()).is_err());
+    assert!(
+        proof::validate(
+            &state,
+            "kata-regional-rwo",
+            &observed,
+            &network(),
+            policy::DEFAULT_CONTROL_NAMESPACE
+        )
+        .is_err()
+    );
 }
 #[test]
 fn additive_egress_and_unbounded_ingress_are_rejected() {
     let labels = json!({"sandbox-id":"test"});
     let deny = json!({"spec":{"podSelector":{},"policyTypes":["Ingress","Egress"]}});
-    policy::validate_policies(std::slice::from_ref(&deny), &labels).expect("deny all");
+    policy::validate_policies(
+        std::slice::from_ref(&deny),
+        &labels,
+        policy::DEFAULT_CONTROL_NAMESPACE,
+    )
+    .expect("deny all");
     let allow = json!({"spec":{"podSelector":{},"policyTypes":["Egress"],"egress":[{}]}});
-    assert!(policy::validate_policies(&[deny, allow], &labels).is_err());
+    assert!(
+        policy::validate_policies(&[deny, allow], &labels, policy::DEFAULT_CONTROL_NAMESPACE)
+            .is_err()
+    );
     for rule in [
         json!({}),
         json!({"ports":[{"port":22}]}),
@@ -116,14 +137,21 @@ fn additive_egress_and_unbounded_ingress_are_rejected() {
     ] {
         let policy =
             json!({"spec":{"podSelector":{},"policyTypes":["Egress","Ingress"],"ingress":[rule]}});
-        assert!(policy::validate_policies(&[policy], &labels).is_err());
+        assert!(
+            policy::validate_policies(&[policy], &labels, policy::DEFAULT_CONTROL_NAMESPACE)
+                .is_err()
+        );
     }
 }
 #[test]
 fn ssh_ingress_is_limited_to_exact_trusted_principal_and_ports() {
-    let policy = manifest::network_policy("id", "sandbox-1h31c");
-    policy::validate_policies(std::slice::from_ref(&policy), &manifest::labels("id"))
-        .expect("trusted");
+    let policy = manifest::network_policy("id", "sandbox-1h31c", policy::DEFAULT_CONTROL_NAMESPACE);
+    policy::validate_policies(
+        std::slice::from_ref(&policy),
+        &manifest::labels("id"),
+        policy::DEFAULT_CONTROL_NAMESPACE,
+    )
+    .expect("trusted");
     for pointer in [
         "/spec/ingress/0/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name",
         "/spec/ingress/0/from/0/podSelector/matchLabels/platform.tryhamster.dev~1role",
@@ -131,18 +159,33 @@ fn ssh_ingress_is_limited_to_exact_trusted_principal_and_ports() {
     ] {
         let mut changed = policy.clone();
         *changed.pointer_mut(pointer).expect("field") = json!("foreign");
-        assert!(policy::validate_policies(&[changed], &manifest::labels("id")).is_err());
+        assert!(
+            policy::validate_policies(
+                &[changed],
+                &manifest::labels("id"),
+                policy::DEFAULT_CONTROL_NAMESPACE
+            )
+            .is_err()
+        );
     }
     let mut changed = policy;
     changed["spec"]["ingress"][0]["ports"][0]["endPort"] = json!(65535);
-    assert!(policy::validate_policies(&[changed], &manifest::labels("id")).is_err());
+    assert!(
+        policy::validate_policies(
+            &[changed],
+            &manifest::labels("id"),
+            policy::DEFAULT_CONTROL_NAMESPACE
+        )
+        .is_err()
+    );
 }
 #[test]
 fn ingress_only_policy_is_not_egress_isolation() {
     assert!(
         policy::validate_policies(
             &[json!({"spec":{"podSelector":{},"policyTypes":["Ingress"],"egress":[]}})],
-            &json!({})
+            &json!({}),
+            policy::DEFAULT_CONTROL_NAMESPACE,
         )
         .is_err()
     );
@@ -162,8 +205,14 @@ fn pod_has_private_storage_no_token_fixed_vm_and_no_python_probe() {
 fn live_proof_binds_uid_image_storage_boot_and_network() {
     let state = state();
     let observed = observations(&state);
-    let (actual, proof) =
-        proof::validate(&state, "standard-rwo", &observed, &network()).expect("live proof");
+    let (actual, proof) = proof::validate(
+        &state,
+        "standard-rwo",
+        &observed,
+        &network(),
+        policy::DEFAULT_CONTROL_NAMESPACE,
+    )
+    .expect("live proof");
     assert_eq!(actual.host, "10.176.0.5");
     assert_eq!(proof["network"], "deny-all-egress");
     for (pointer, value) in [
@@ -180,7 +229,14 @@ fn live_proof_binds_uid_image_storage_boot_and_network() {
         let mut changed = observations(&state);
         *changed.pod.pointer_mut(pointer).expect("field") = value;
         assert!(
-            proof::validate(&state, "standard-rwo", &changed, &network()).is_err(),
+            proof::validate(
+                &state,
+                "standard-rwo",
+                &changed,
+                &network(),
+                policy::DEFAULT_CONTROL_NAMESPACE
+            )
+            .is_err(),
             "accepted {pointer}"
         );
     }
@@ -240,7 +296,16 @@ fn live_proof_rejects_guest_address_outside_operator_range() {
     let state = state();
     let mut observed = observations(&state);
     observed.pod["status"]["podIP"] = json!("10.177.0.5");
-    assert!(proof::validate(&state, "standard-rwo", &observed, &network()).is_err());
+    assert!(
+        proof::validate(
+            &state,
+            "standard-rwo",
+            &observed,
+            &network(),
+            policy::DEFAULT_CONTROL_NAMESPACE
+        )
+        .is_err()
+    );
 }
 #[test]
 fn retained_state_round_trips_privately_and_deletion_erases_ssh_files() {
@@ -680,13 +745,112 @@ fn live_proof_refuses_deadline_removal_extension_expiry_and_legacy_metadata() {
     for seconds in [json!(null), json!(0), json!(86400)] {
         let mut observed = observations(&state);
         observed.pod["spec"]["activeDeadlineSeconds"] = seconds;
-        assert!(proof::validate(&state, "standard-rwo", &observed, &network()).is_err());
+        assert!(
+            proof::validate(
+                &state,
+                "standard-rwo",
+                &observed,
+                &network(),
+                policy::DEFAULT_CONTROL_NAMESPACE
+            )
+            .is_err()
+        );
     }
     for expires in [None, Some(lease::now().expect("now") - 1)] {
         let mut expired = state.clone();
         expired.expires_at = expires;
         assert!(
-            proof::validate(&expired, "standard-rwo", &observations(&state), &network()).is_err()
+            proof::validate(
+                &expired,
+                "standard-rwo",
+                &observations(&state),
+                &network(),
+                policy::DEFAULT_CONTROL_NAMESPACE
+            )
+            .is_err()
         );
+    }
+}
+
+#[test]
+fn configured_control_namespace_is_exact_for_isolated_policy_and_proof() {
+    let control = "release-39bd86447bde-gateway";
+    let policy = manifest::network_policy("id", "sandbox-tenant", control);
+    policy::validate_policies(
+        std::slice::from_ref(&policy),
+        &manifest::labels("id"),
+        control,
+    )
+    .expect("configured operator principal");
+    for other in [policy::DEFAULT_CONTROL_NAMESPACE, "release-other-gateway"] {
+        assert!(
+            policy::validate_policies(
+                std::slice::from_ref(&policy),
+                &manifest::labels("id"),
+                other
+            )
+            .is_err()
+        );
+    }
+    let mut additional = policy.clone();
+    additional["spec"]["ingress"][0]["from"]
+        .as_array_mut()
+        .expect("sources")
+        .push(json!({
+            "namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"foreign"}},
+            "podSelector":{"matchLabels":{"platform.tryhamster.dev/role":"sandbox-control"}}
+        }));
+    assert!(policy::validate_policies(&[additional], &manifest::labels("id"), control).is_err());
+    let mut wrong_role = policy;
+    wrong_role["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"]["platform.tryhamster.dev/role"] =
+        json!("other");
+    assert!(policy::validate_policies(&[wrong_role], &manifest::labels("id"), control).is_err());
+    let state = state();
+    let mut observed = observations(&state);
+    observed.policies = vec![manifest::network_policy(
+        &state.name,
+        &state.namespace,
+        control,
+    )];
+    proof::validate(&state, "standard-rwo", &observed, &network(), control)
+        .expect("configured revalidation");
+    assert!(
+        proof::validate(
+            &state,
+            "standard-rwo",
+            &observed,
+            &network(),
+            policy::DEFAULT_CONTROL_NAMESPACE
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn control_namespace_rejects_non_dns_labels() {
+    for invalid in [
+        "",
+        "UPPER",
+        "a.b",
+        "a_b",
+        "-first",
+        "last-",
+        "é",
+        "a/b",
+        " ",
+        &"a".repeat(64),
+    ] {
+        assert!(
+            policy::validate_control_namespace(invalid).is_err(),
+            "accepted {invalid:?}"
+        );
+    }
+    for valid in [
+        policy::DEFAULT_CONTROL_NAMESPACE,
+        "release-39bd86447bde-gateway",
+        "a",
+        "0",
+    ] {
+        policy::validate_control_namespace(valid).expect("valid namespace");
     }
 }
