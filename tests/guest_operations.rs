@@ -26,6 +26,7 @@ fn config(root: &Path, profile: RuntimeProfile) -> Config {
         runtime_profile: profile,
         guest_image: Some(IMAGE.into()),
         guest_network_cidr: Some("10.176.0.0/16".into()),
+        additional_guest_images: Vec::new(),
         recovery_dir: None,
         hosted_network_config: None,
     }

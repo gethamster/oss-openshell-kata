@@ -140,10 +140,10 @@ impl Driver {
         sandbox: &c::DriverSandbox,
     ) -> anyhow::Result<Option<crate::profile::VmPolicy>> {
         if let Some(policy) = &self.operator_policy {
-            return admission::compile_request_for_image(
+            return admission::compile_request_for_images(
                 sandbox,
                 policy,
-                self.config.guest_image.as_deref(),
+                &self.config.admitted_images(),
             )
             .map(Some);
         }

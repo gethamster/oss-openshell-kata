@@ -20,6 +20,7 @@ fn config(root: &std::path::Path) -> Arc<Config> {
         runtime_profile: openshell_kata::config::RuntimeProfile::Local,
         guest_image: None,
         guest_network_cidr: None,
+        additional_guest_images: Vec::new(),
         recovery_dir: None,
         hosted_network_config: None,
     })
