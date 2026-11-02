@@ -142,6 +142,7 @@ impl Fixture {
             additional_guest_images: Vec::new(),
             recovery_dir: None,
             hosted_network_config: None,
+            max_sandboxes: None,
         });
         let guest = Guest {
             sandbox_id: "test-id".into(),

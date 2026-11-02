@@ -234,3 +234,17 @@ fn socket_paths_are_short_and_bound_to_complete_identifiers() {
     let long = StateDirectory::new(parent.join("x".repeat(90))).expect("long state root");
     assert!(long.control_path("one").is_err());
 }
+
+#[test]
+fn retained_inventory_counts_private_guests_and_rejects_unknown_entries() {
+    let (_temporary, parent) = root();
+    let state = StateDirectory::new(parent.join("state")).expect("state");
+    state.create("one").expect("first guest");
+    state.create("two").expect("second guest");
+    state
+        .control_path("one")
+        .expect("internal socket directory");
+    assert_eq!(state.retained_count().expect("count"), 2);
+    fs::write(state.root().join("unknown"), b"not guest state").expect("unexpected entry");
+    assert!(state.retained_count().is_err());
+}

@@ -233,7 +233,9 @@ must not claim that the file-transfer quota prevents all data export.
 Enforce the configured vCPU and memory allocation outside the guest. Account
 for host VMM overhead separately from the guest's requested memory. The local
 profile grants 2048 MiB of guest RAM and caps both the parent and shim cgroups
-at 2304 MiB, including a fixed 256 MiB host runtime allowance. The allowance
+at 2304 MiB, including a 256 MiB host runtime allowance. Larger profiles reserve
+the larger of 256 MiB and 1/64 of guest RAM (2048 MiB for the 128 GiB
+`foundry-build` profile), since host page tables grow with touched guest RAM. The allowance
 does not enlarge guest RAM; unlimited or mismatched host caps are rejected. The host
 must reserve sufficient capacity for concurrent guests and trusted services;
 per-guest limits do not justify unlimited aggregate admission.

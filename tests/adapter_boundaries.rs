@@ -21,6 +21,7 @@ fn local_prototype_mode_cannot_be_redirected_by_url_userinfo() {
         additional_guest_images: Vec::new(),
         recovery_dir: None,
         hosted_network_config: None,
+        max_sandboxes: None,
     };
     assert!(config.validate().is_ok());
     for endpoint in [
@@ -111,6 +112,7 @@ fn hosted_operator_requires_an_explicit_private_guest_network() {
         additional_guest_images: Vec::new(),
         recovery_dir: Some("/private/registry".into()),
         hosted_network_config: None,
+        max_sandboxes: None,
     };
     assert!(config.validate().is_err(), "network cannot be implicit");
     config.guest_network_cidr = Some("172.20.0.0/16".into());

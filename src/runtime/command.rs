@@ -1,6 +1,8 @@
 //! Bounded operator-command execution for the dedicated Linux runtime node.
 
 use anyhow::{Context, Result, bail};
+use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
 use std::process::{Output, Stdio};
 use std::time::Duration;
@@ -11,10 +13,24 @@ const NODE_COMMAND_TIMEOUT: Duration = Duration::from_secs(100);
 const MAX_DIAGNOSTIC_CHARACTERS: usize = 4096;
 const MAX_COMMAND_OUTPUT_BYTES: u64 = 1024 * 1024;
 
-/// A validated, dedicated Lima node that executes only explicit operator commands.
+/// Operator-selected transport to the dedicated runtime node.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NodeTransport {
+    /// Apple Silicon development through the existing Lima node.
+    #[default]
+    Lima,
+    /// Native Linux host commands with noninteractive privilege escalation.
+    LinuxLocal,
+}
+
+/// A validated, dedicated node that executes only explicit operator commands.
 #[derive(Clone, Debug)]
 pub struct Node {
     vm: String,
+    transport: NodeTransport,
+    #[cfg(test)]
+    test_runner: Option<std::path::PathBuf>,
 }
 
 impl Node {
@@ -23,6 +39,11 @@ impl Node {
     /// # Errors
     /// Rejects an empty, non-ASCII, overlong, or syntactically invalid node name.
     pub fn new(vm: impl Into<String>) -> Result<Self> {
+        Self::with_transport(vm, NodeTransport::Lima)
+    }
+
+    /// Construct a node with an explicit trusted operator transport.
+    pub fn with_transport(vm: impl Into<String>, transport: NodeTransport) -> Result<Self> {
         let vm = vm.into();
         if vm.is_empty()
             || vm.len() > 64
@@ -33,12 +54,30 @@ impl Node {
         {
             bail!("invalid runtime node name");
         }
-        Ok(Self { vm })
+        Ok(Self {
+            vm,
+            transport,
+            #[cfg(test)]
+            test_runner: None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_runner(self, path: std::path::PathBuf) -> Self {
+        Self {
+            test_runner: Some(path),
+            ..self
+        }
     }
 
     /// Return the validated node name used for local transport configuration.
     pub fn vm(&self) -> &str {
         &self.vm
+    }
+
+    /// Return the explicit node transport.
+    pub fn transport(&self) -> NodeTransport {
+        self.transport
     }
 
     /// Execute an operator command with a deadline, rejecting nonzero exit status.
@@ -144,16 +183,88 @@ impl Node {
     /// # Errors
     /// Reports transport launch failures and the outer command deadline.
     pub async fn raw_node(&self, args: &[OsString]) -> Result<Output> {
-        let mut arguments = vec![
-            "shell".into(),
-            self.vm.clone().into(),
-            "sudo".into(),
-            "timeout".into(),
-            "90".into(),
-        ];
-        arguments.extend_from_slice(args);
-        self.raw_command("limactl", &arguments, NODE_COMMAND_TIMEOUT)
+        #[cfg(test)]
+        if let Some(runner) = &self.test_runner {
+            return self.raw_command(runner, args, NODE_COMMAND_TIMEOUT).await;
+        }
+        let (program, arguments) = self.node_invocation(args);
+        self.raw_command(program, &arguments, NODE_COMMAND_TIMEOUT)
             .await
+    }
+
+    fn node_invocation(&self, args: &[OsString]) -> (&'static str, Vec<OsString>) {
+        let (program, mut arguments): (_, Vec<OsString>) = match self.transport {
+            NodeTransport::Lima => (
+                "limactl",
+                vec![
+                    "shell".into(),
+                    self.vm.clone().into(),
+                    "sudo".into(),
+                    "-n".into(),
+                    "--".into(),
+                    "timeout".into(),
+                    "--signal=KILL".into(),
+                    "90".into(),
+                ],
+            ),
+            NodeTransport::LinuxLocal => (
+                "sudo",
+                vec![
+                    "-n".into(),
+                    "--".into(),
+                    "timeout".into(),
+                    "--signal=KILL".into(),
+                    "90".into(),
+                ],
+            ),
+        };
+        arguments.extend_from_slice(args);
+        (program, arguments)
+    }
+
+    /// Stage a private local file on the selected node without invoking a shell.
+    pub async fn stage(&self, source: &std::path::Path) -> Result<String> {
+        if self.transport == NodeTransport::LinuxLocal {
+            let path = source
+                .canonicalize()
+                .context("canonicalizing staged file")?;
+            if !path.is_file() {
+                bail!("staged source is not a regular file");
+            }
+            return Ok(path.to_str().context("non-UTF8 staged path")?.to_owned());
+        }
+        let stage = self
+            .command(
+                "limactl",
+                &[
+                    "shell".into(),
+                    self.vm.clone().into(),
+                    "mktemp".into(),
+                    "/tmp/osk-transfer.XXXXXXXX".into(),
+                ],
+                Duration::from_secs(15),
+            )
+            .await?;
+        let stage = String::from_utf8(stage.stdout)?.trim().to_owned();
+        self.command(
+            "limactl",
+            &[
+                "cp".into(),
+                source.as_os_str().to_owned(),
+                format!("{}:{stage}", self.vm).into(),
+            ],
+            Duration::from_secs(30),
+        )
+        .await?;
+        Ok(stage)
+    }
+
+    /// Remove only a remote staging copy; local source ownership remains with the caller.
+    pub async fn unstage(&self, stage: &str) -> Result<()> {
+        if self.transport == NodeTransport::Lima {
+            self.node(&["rm".into(), "--".into(), stage.into()]).await?;
+        }
+        Ok(())
     }
 
     /// Run a checked containerd command using the capped block-device snapshotter.
@@ -201,6 +312,25 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn linux_local_transport_has_noninteractive_privilege_and_bounded_timeout() {
+        let node = Node::with_transport("native", NodeTransport::LinuxLocal).expect("native node");
+        let (program, args) = node.node_invocation(&["printf".into(), "a b; $x".into()]);
+        assert_eq!(program, "sudo");
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("-n"),
+                "--".into(),
+                "timeout".into(),
+                "--signal=KILL".into(),
+                "90".into(),
+                "printf".into(),
+                "a b; $x".into()
+            ]
+        );
+    }
 
     #[test]
     fn node_names_reject_options_paths_and_non_ascii() {

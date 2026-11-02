@@ -362,3 +362,252 @@ async fn interrupted_provisioning_and_failed_recovery_never_publish_ready() -> a
     fixture.close().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn native_recovery_stops_before_inventory_and_requires_new_authenticated_start()
+-> anyhow::Result<()> {
+    use openshell_kata::{
+        profile::VmPolicy,
+        recovery::{Retained, Store},
+    };
+    let fixture = Fixture::new(vec!["fixture-main".into()]).await?;
+    let root = fixture.files.path();
+    let policy: VmPolicy = serde_json::from_value(
+        serde_json::json!({"version":1,"profile":"docker-vm","resources":{"vcpus":32,"memory_mib":131072,"disk_mib":262144,"lifetime_secs":3600},"filesystem":{"host_mounts":"deny","transfer_max_bytes":268435456,"transfer_max_entries":4096},"network":{"tcp_allow":[]}}),
+    )?;
+    let path = root.join("native-policy.json");
+    fs::write(&path, serde_json::to_vec(&policy)?)?;
+    let config = Arc::new(Config {
+        runtime_profile: RuntimeProfile::Local,
+        vm_policy: Some(path),
+        guest_network_cidr: None,
+        additional_guest_images: Vec::new(),
+        recovery_dir: Some(root.join("native-registry")),
+        max_sandboxes: Some(4),
+        ..(*fixture.runtime.config).clone()
+    });
+    let mut route: serde_json::Value = serde_json::from_slice(&fs::read(root.join("route.json"))?)?;
+    route["host"] = serde_json::json!("127.0.0.1");
+    route["port"] = serde_json::json!(2222);
+    route["enforcement"] = serde_json::json!({"sandbox_id":"fixture-id","policy_sha256":policy.digest()?,"nonce":"RUNTIME_NONCE","runtime":"kata-runtime-rs","hypervisor_pid":101,"resources":policy.resources,"storage_id":"private-block-snapshot","network_fence":"generation-proof","watchdog_pid":102,"expires_at_unix_secs":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs()+3600});
+    fs::write(root.join("native-route.json"), serde_json::to_vec(&route)?)?;
+    let lifecycle = format!(
+        "#!/bin/sh\naction=$1\nshift 2\nnonce=\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --proof-nonce ]; then nonce=$2; shift; fi; shift; done\ncase \"$action\" in\nstop) touch '{}'; printf '{{}}' ;;\nstart|create|verify|update) sed \"s/RUNTIME_NONCE/$nonce/g\" '{}' ;;\n*) printf '{{}}' ;;\nesac\n",
+        root.join("native-stopped").display(),
+        root.join("native-route.json").display()
+    );
+    executable(&config.lifecycle, "#!/bin/sh\nexit 23\n")?;
+    let store = Store::for_config(&config)?;
+    store.save(&Retained::new(
+        fixture.intent()?,
+        INSTANCE.into(),
+        "old-generation".into(),
+    ))?;
+    let driver = Driver::new(config.clone())?;
+    assert!(
+        driver.recover().await.is_err(),
+        "unconfirmed cleanup prevents publishing inventory"
+    );
+    assert!(
+        driver
+            .list_sandboxes(Request::new(c::ListSandboxesRequest {}))
+            .await?
+            .into_inner()
+            .sandboxes
+            .is_empty()
+    );
+    executable(&config.lifecycle, &lifecycle)?;
+    driver.recover().await?;
+    assert!(
+        root.join("native-stopped").exists(),
+        "native lifecycle stop precedes exposure"
+    );
+    let record = driver
+        .get_sandbox(Request::new(c::GetSandboxRequest {
+            sandbox_id: "fixture-id".into(),
+            ..Default::default()
+        }))
+        .await?
+        .into_inner()
+        .sandbox
+        .expect("native retained record");
+    assert!(record.spec.expect("spec").launch_authentication.is_empty());
+    assert!(
+        record
+            .status
+            .expect("status")
+            .conditions
+            .iter()
+            .any(|condition| condition.r#type == "Suspended" && condition.status == "True")
+    );
+    assert_eq!(
+        driver
+            .start_sandbox(Request::new(c::StartSandboxRequest {
+                sandbox_id: "fixture-id".into(),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("fresh authorization required")
+            .code(),
+        tonic::Code::InvalidArgument
+    );
+    let mut authentication: serde_json::Value = serde_json::from_slice(&fixture.authentication()?)?;
+    authentication["supervisor"]["gateway_token"] = serde_json::json!("fresh-start-credential");
+    driver
+        .start_sandbox(Request::new(c::StartSandboxRequest {
+            sandbox_id: "fixture-id".into(),
+            generation_id: "native-restart".into(),
+            launch_authentication: serde_json::to_vec(&authentication)?,
+            ..Default::default()
+        }))
+        .await?;
+    driver_ready(&driver).await?;
+    assert!(
+        fixture
+            .state
+            .headers
+            .lock()
+            .expect("headers")
+            .iter()
+            .any(|header| header == "Bearer fresh-start-credential")
+    );
+    driver
+        .delete_sandbox(Request::new(c::DeleteSandboxRequest {
+            sandbox_id: "fixture-id".into(),
+            ..Default::default()
+        }))
+        .await?;
+    assert!(store.load(&config)?.admitted.is_empty());
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn recovery_retires_sandboxes_the_new_operator_profile_no_longer_admits() -> anyhow::Result<()>
+{
+    use openshell_kata::{
+        profile::VmPolicy,
+        recovery::{Retained, Store},
+    };
+    let fixture = Fixture::new(vec!["fixture-main".into()]).await?;
+    let root = fixture.files.path();
+    let policy: VmPolicy = serde_json::from_value(
+        serde_json::json!({"version":1,"profile":"docker-vm","resources":{"vcpus":32,"memory_mib":131072,"disk_mib":262144,"lifetime_secs":3600},"filesystem":{"host_mounts":"deny","transfer_max_bytes":268435456,"transfer_max_entries":4096},"network":{"tcp_allow":[]}}),
+    )?;
+    let path = root.join("native-policy.json");
+    fs::write(&path, serde_json::to_vec(&policy)?)?;
+    let retired_image = IMAGE.replace("aaaa", "cccc");
+    let previous = Config {
+        runtime_profile: RuntimeProfile::Local,
+        vm_policy: Some(path),
+        guest_network_cidr: None,
+        additional_guest_images: vec![retired_image.clone()],
+        recovery_dir: Some(root.join("native-registry")),
+        max_sandboxes: Some(4),
+        ..(*fixture.runtime.config).clone()
+    };
+    let store = Store::for_config(&previous)?;
+    store.save(&Retained::new(
+        fixture.intent()?,
+        INSTANCE.into(),
+        "kept-generation".into(),
+    ))?;
+    let mut old = fixture.intent()?;
+    old.id = "retired-id".into();
+    old.spec
+        .as_mut()
+        .expect("spec")
+        .template
+        .as_mut()
+        .expect("template")
+        .image = retired_image;
+    store.save(&Retained::new(
+        old,
+        INSTANCE.into(),
+        "old-generation".into(),
+    ))?;
+    // The next release no longer admits the previous image.
+    let config = Arc::new(Config {
+        additional_guest_images: Vec::new(),
+        ..previous
+    });
+    let log = root.join("lifecycle.log");
+    executable(
+        &config.lifecycle,
+        &format!(
+            "#!/bin/sh\necho \"$1 $2\" >> '{}'\ncase \"$1\" in delete) exit 7 ;; esac\nprintf '{{}}'\n",
+            log.display()
+        ),
+    )?;
+    let failing = Driver::new(config.clone())?;
+    failing.recover().await?;
+    assert!(
+        Store::for_config(&config)?.load(&config)?.retired.len() == 1,
+        "a failed retirement keeps its record for the next recovery"
+    );
+    let ids = |driver: Driver| async move {
+        anyhow::Ok(
+            driver
+                .list_sandboxes(Request::new(c::ListSandboxesRequest {}))
+                .await?
+                .into_inner()
+                .sandboxes
+                .into_iter()
+                .map(|sandbox| sandbox.id)
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(ids(failing).await?, vec!["fixture-id".to_owned()]);
+
+    fs::remove_file(&log)?;
+    executable(
+        &config.lifecycle,
+        &format!(
+            "#!/bin/sh\necho \"$1 $2\" >> '{}'\nprintf '{{}}'\n",
+            log.display()
+        ),
+    )?;
+    let driver = Driver::new(config.clone())?;
+    driver.recover().await?;
+    let calls = fs::read_to_string(&log)?;
+    assert!(calls.contains("delete retired-id"), "{calls}");
+    assert!(calls.contains("stop fixture-id"), "{calls}");
+    assert!(!calls.contains("stop retired-id"), "{calls}");
+    assert_eq!(
+        driver
+            .get_sandbox(Request::new(c::GetSandboxRequest {
+                sandbox_id: "retired-id".into(),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("retired sandbox is gone")
+            .code(),
+        tonic::Code::NotFound
+    );
+    let recovered = Store::for_config(&config)?.load(&config)?;
+    assert!(recovered.retired.is_empty(), "retired record removed");
+    assert_eq!(recovered.admitted.len(), 1);
+    let mut watch = driver
+        .watch_sandboxes(Request::new(c::WatchSandboxesRequest {}))
+        .await?
+        .into_inner();
+    let mut deleted = false;
+    for _ in 0..4 {
+        let Ok(Some(event)) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), watch.next()).await
+        else {
+            break;
+        };
+        let event = event?;
+        if let Some(c::watch_sandboxes_event::Payload::Deleted(gone)) = event.payload {
+            deleted |= gone.sandbox_id == "retired-id";
+        }
+    }
+    assert!(
+        deleted,
+        "the gateway observes the retired sandbox as deleted"
+    );
+    assert_eq!(ids(driver).await?, vec!["fixture-id".to_owned()]);
+    fixture.close().await;
+    Ok(())
+}
