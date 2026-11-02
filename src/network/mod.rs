@@ -14,7 +14,8 @@ pub use compiler::compile_native;
 pub use fence::{FenceProof, FenceSpec, install_fence, remove_fence, verify_fence};
 pub use guard::{
     BrokerBinding, HostedBrokerConfig, HostedBrokerHandle, HostedControlRequest,
-    HostedControlResponse, InfrastructureInventory, bind_hosted_broker,
+    HostedControlResponse, InfrastructureInventory, ProviderAuthorization, ProviderMaterial,
+    bind_hosted_broker,
 };
 pub use policy::{
     Endpoint, NetworkPolicy, ValidatedNetworkPolicy, globally_routable, normalize_host,

@@ -23,6 +23,7 @@ fn config(root: &std::path::Path) -> Arc<Config> {
         additional_guest_images: Vec::new(),
         recovery_dir: None,
         hosted_network_config: None,
+        hosted_resource_profile: Default::default(),
         max_sandboxes: None,
     })
 }

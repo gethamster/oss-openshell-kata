@@ -131,6 +131,9 @@ fn bound() -> broker_config::Binding {
     let mut b = binding();
     let c = HostedBrokerConfig {
         version: 1,
+        provider_mediation: false,
+        gateway_endpoint: String::new(),
+        gateway_ca_pem: String::new(),
         operator_ceiling: NetworkPolicy::default(),
         initial_ceiling: NetworkPolicy::default(),
         binding: BrokerBinding {
@@ -168,6 +171,7 @@ fn response(b: &broker_config::Binding) -> crate::network::HostedControlResponse
         authorization_expires_at_unix: 0,
         active_connections: 0,
         stopping: false,
+        provider_material: None,
     }
 }
 #[test]

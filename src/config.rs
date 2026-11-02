@@ -41,6 +41,30 @@ pub enum RuntimeProfile {
     Kubernetes,
 }
 
+/// Fixed hosted resource shapes independently enforced by Kubernetes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum HostedResourceProfile {
+    #[default]
+    #[value(name = "hosted-2cpu-4gib")]
+    Hosted2cpu4gib,
+    #[value(name = "owner-4cpu-8gib")]
+    Owner4cpu8gib,
+}
+impl HostedResourceProfile {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Hosted2cpu4gib => "hosted-2cpu-4gib",
+            Self::Owner4cpu8gib => "owner-4cpu-8gib",
+        }
+    }
+    pub fn limits(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Hosted2cpu4gib => ("2", "4Gi"),
+            Self::Owner4cpu8gib => ("4", "8Gi"),
+        }
+    }
+}
+
 /// Operator configuration; no workload input can select host commands.
 #[derive(Clone, Debug, Parser)]
 pub struct Config {
@@ -79,6 +103,9 @@ pub struct Config {
     /// Explicit operator profile for brokered hosted TCP; absent means deny-all.
     #[arg(long)]
     pub hosted_network_config: Option<PathBuf>,
+    /// Operator-qualified shape for every guest of this adapter.
+    #[arg(long, value_enum, default_value = "hosted-2cpu-4gib")]
+    pub hosted_resource_profile: HostedResourceProfile,
     /// Operator capacity of the native node: the most retained sandboxes, stopped
     /// guests included, it admits at once. Required with native recovery. The
     /// lifecycle reads the same `OPENSHELL_KATA_MAX_SANDBOXES` service setting.
@@ -123,20 +150,27 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if self.runtime_profile != RuntimeProfile::Kubernetes
+            && self.hosted_resource_profile != HostedResourceProfile::default()
+        {
+            bail!("hosted resource profile requires the Kubernetes runtime");
+        }
         if let Some(path) = &self.hosted_network_config {
             if self.runtime_profile != RuntimeProfile::Kubernetes || !path.is_absolute() {
                 bail!("hosted network configuration requires Kubernetes and an absolute path");
             }
             crate::kubernetes::HostedNetworkConfig::load(path)?;
         }
+        if self.additional_guest_images.len() > 16 {
+            bail!("too many additional guest images");
+        }
         if !self.additional_guest_images.is_empty() {
-            if self.runtime_profile != RuntimeProfile::Local
-                || self.guest_image.is_none()
-                || self.vm_policy.is_none()
+            if self.guest_image.is_none()
+                || (self.runtime_profile == RuntimeProfile::Local && self.vm_policy.is_none())
                 || self.prototype_policy_mode
             {
                 bail!(
-                    "additional guest images require the enforced local VM profile and a default guest image"
+                    "additional guest images require an enforced runtime and a default guest image"
                 );
             }
             for image in &self.additional_guest_images {
@@ -250,18 +284,21 @@ impl Config {
                 }
             }
             RuntimeProfile::Kubernetes => {
+                let selected = self.for_sandbox(sandbox);
+                let (cpu, memory) = self.hosted_resource_profile.limits();
+                crate::hosted::validate_resource_shape(sandbox, cpu, memory)?;
                 if let Some(path) = &self.hosted_network_config {
                     let operator = crate::kubernetes::HostedNetworkConfig::load(path)?;
-                    crate::hosted::validate_brokered_request(
+                    crate::hosted::validate_network_request(
                         sandbox,
-                        self.guest_image.as_deref().unwrap_or(""),
-                        &operator.operator_ceiling,
+                        selected.guest_image.as_deref().unwrap_or(""),
+                        &operator,
                     )
                     .map(|_| ())
                 } else {
                     crate::hosted::validate_request(
                         sandbox,
-                        self.guest_image.as_deref().unwrap_or(""),
+                        selected.guest_image.as_deref().unwrap_or(""),
                     )
                 }
             }

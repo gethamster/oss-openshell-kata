@@ -18,6 +18,15 @@ pub(super) const COMPONENT: &str = "openshell-kata.io/component";
 #[serde(deny_unknown_fields)]
 pub struct HostedNetworkConfig {
     pub version: u32,
+    /// Use attached OpenShell providers as destination authority.
+    #[serde(default)]
+    pub provider_mediation: bool,
+    #[serde(default)]
+    pub gateway_endpoint: String,
+    #[serde(default)]
+    pub gateway_ca_file: PathBuf,
+    #[serde(default)]
+    pub gateway_addresses: Vec<std::net::Ipv4Addr>,
     pub broker_namespace: String,
     pub broker_namespace_uid: String,
     pub operator_ceiling: NetworkPolicy,
@@ -57,6 +66,33 @@ impl HostedNetworkConfig {
             "guard client TLS config must be absolute"
         );
         self.operator_ceiling.validate()?;
+        ensure!(
+            !self.provider_mediation || self.operator_ceiling.tcp_allow.is_empty(),
+            "provider mediation cannot carry a separate hostname ceiling"
+        );
+        if self.provider_mediation {
+            let endpoint = tonic::transport::Endpoint::from_shared(self.gateway_endpoint.clone())?;
+            ensure!(
+                endpoint.uri().scheme_str() == Some("https")
+                    && endpoint
+                        .uri()
+                        .authority()
+                        .is_some_and(|authority| !authority.as_str().contains('@')),
+                "provider gateway requires an exact HTTPS endpoint"
+            );
+            ensure!(
+                self.gateway_ca_file.is_absolute()
+                    && !self.gateway_addresses.is_empty()
+                    && self.gateway_addresses.len() <= 8,
+                "provider gateway requires a pinned CA and bounded control addresses"
+            );
+            ensure!(
+                self.gateway_addresses
+                    .iter()
+                    .all(|ip| ip.is_private() && !ip.is_loopback() && !ip.is_link_local()),
+                "gateway control addresses must be private infrastructure addresses"
+            );
+        }
         validate_nameservers(&self.resolver_nameservers)?;
         ensure!(
             (1..=30).contains(&self.authorization_lease_secs),

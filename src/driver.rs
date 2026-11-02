@@ -159,10 +159,14 @@ impl Driver {
             .as_deref()
             .map(|path| {
                 let operator = crate::kubernetes::HostedNetworkConfig::load(path)?;
-                crate::hosted::validate_brokered_request(
+                crate::hosted::validate_network_request(
                     sandbox,
-                    self.config.guest_image.as_deref().unwrap_or(""),
-                    &operator.operator_ceiling,
+                    self.config
+                        .for_sandbox(sandbox)
+                        .guest_image
+                        .as_deref()
+                        .unwrap_or(""),
+                    &operator,
                 )
             })
             .transpose()

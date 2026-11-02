@@ -233,3 +233,68 @@ hosted sibling `e2d897e` and its image receipts are separate baseline evidence.
 The reconciled Rust candidate must repeat the complete System/CLI flow, two-tenant
 denials, token renewal, lease expiry, restart/recovery and observation period on
 its exact artifacts before promotion. See `DELIVERY_PLAN.md` for current gates.
+
+## Provider-mediated egress
+
+Set `provider_mediation: true` in the hosted network configuration to use
+attached OpenShell providers as the destination authority. In this mode
+`operator_ceiling` must be `{ "tcp_allow": [] }`: there is no second hostname
+allowlist. The broker uses OpenShell's TLS, HTTP policy and credential mediation
+outside the guest. Its public listener remains bound to one sandbox launch by
+the existing node fence and exact namespace/Pod policy.
+
+The operator configuration also supplies `gateway_endpoint`, the absolute
+`gateway_ca_file`, and a bounded `gateway_addresses` list of private IPv4
+addresses. Those addresses permit only the broker's authenticated gateway
+control connection. They do not authorize guest requests to private networks.
+The original inventory, protected hostname suffixes, public-address checks and
+short authorization lease remain enforced. A stale inventory, invalid snapshot,
+expired lease or revoked attachment closes existing provider connections.
+
+The adapter forwards matching admitted configuration/provider snapshots and its
+current sandbox-scoped gateway JWT over the broker's private control channel.
+It never persists that JWT or provider credentials. The guest receives only
+endpoint-bound placeholders, public provider configuration and the broker CA.
+The broker checks every DNS result before dialing; mixed private/public answers
+fail closed. Provider policy changes use the existing generation/CAS control
+protocol, and a prior generation cannot reopen revoked access.
+
+Provider policies must explicitly select `/**` and omit filesystem, Landlock and
+process-identity clauses. This is VM scope: guest root can use the attached
+provider, and the adapter never claims to attest an executable inside the VM.
+Process-scoped provider profiles are rejected.
+
+Operator-pinned System guest layers may be admitted with repeated
+`--additional-guest-image` flags. `--hosted-resource-profile owner-4cpu-8gib`
+selects the fixed 4-vCPU/8-GiB owner shape; its requests must explicitly match
+that shape. The default remains `hosted-2cpu-4gib`. Node-intent configuration
+must list the same immutable `additional_guest_images`. Both the adapter and
+node preboot validation reject an unlisted image.
+
+Qualify this mode on the target cluster with provider attach, a successful
+request, credential refresh, detach/revoke, forbidden hosts, metadata/private
+addresses, cross-VM isolation and restart recovery. Unit and broker control tests
+do not establish that a cluster has installed the required guarded runtime.
+
+
+Before publishing the guarded-runtime Ready label on a fresh or rebooted node,
+run `unshare --net /usr/local/bin/kata-runtime-guard probe` with the prepared
+root-owned runtime guard configuration. The probe rejects the host network
+namespace and any namespace with an existing non-loopback interface. It loads
+the pinned TCX object, attaches and reads back both classifiers on a temporary
+dummy interface, then drops both links and deletes that interface before
+reporting success. It creates no BPF pins and touches no live guest interface.
+A kernel version string alone is not a capability proof.
+
+
+Provider node bootstrap sets `provider_bootstrap: true` in the root-owned runtime
+guard configuration. Startup takes a shared lock on
+`/run/openshell-kata/provider-bootstrap.lock`; bootstrap holds the exclusive lock
+through preparation and qualification. The lock inode must never be replaced.
+Before releasing it, bootstrap atomically writes
+`/run/openshell-kata/provider-bootstrap-ready.json` with `version: 1`, the exact
+`node_uid`, current `boot_id`, and `guard_config_sha256` of the written runtime
+guard configuration bytes. A missing or mismatched receipt rejects startup;
+waiting for the exclusive lock is bounded to sixty seconds. The shared lock
+remains held until the official shim is executed. Probe, proof service,
+informational shim operations, and deletion remain available during bootstrap.

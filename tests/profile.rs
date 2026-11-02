@@ -329,6 +329,7 @@ fn operator_image_allowlist_admits_only_pinned_templates_under_one_vm_profile() 
         guest_network_cidr: None,
         additional_guest_images: vec![thread.clone(), workspace.clone()],
         hosted_network_config: None,
+        hosted_resource_profile: Default::default(),
         recovery_dir: None,
         max_sandboxes: None,
     };

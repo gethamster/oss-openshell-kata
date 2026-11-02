@@ -30,6 +30,9 @@ pub(super) fn fixture() -> Result<(config::Config, Value, admission::Launch)> {
     };
     let broker_config = HostedBrokerConfig {
         version: 1,
+        provider_mediation: false,
+        gateway_endpoint: String::new(),
+        gateway_ca_pem: String::new(),
         operator_ceiling: NetworkPolicy::default(),
         initial_ceiling: NetworkPolicy::default(),
         binding,
@@ -432,5 +435,19 @@ fn unrendered_broker_pod_fields_cannot_acquire_preboot_authority() -> Result<()>
             "preboot authority accepted unrendered {field}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn node_admission_accepts_only_operator_pinned_additional_guest_images() -> Result<()> {
+    let (mut config, mut guest, launch) = fixture()?;
+    let extra = format!("registry.example/thread@sha256:{}", "b".repeat(64));
+    guest["spec"]["containers"][0]["image"] = json!(extra);
+    guest["spec"]["initContainers"][0]["image"] = json!(extra);
+    assert!(admission::derive(&config, &guest, &launch).is_err());
+    config.additional_guest_images = vec![extra];
+    admission::derive(&config, &guest, &launch)?;
+    guest["spec"]["initContainers"][0]["image"] = json!(IMAGE);
+    assert!(admission::derive(&config, &guest, &launch).is_err());
     Ok(())
 }

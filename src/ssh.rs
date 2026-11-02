@@ -101,21 +101,14 @@ impl Handler {
                 Operation::Exec(command) if crate::download::is_archive_command(&command) => {
                     crate::download::serve(channel, runtime, &command).await
                 }
-                Operation::Exec(command) => {
-                    match runtime
-                        .guest
-                        .exec_shell(&runtime.config, Some(&command), shell_mode)
-                    {
-                        Ok(child) => bridge(channel, child, runtime).await,
-                        Err(error) => Err(error),
-                    }
-                }
-                Operation::Shell => {
-                    match runtime.guest.exec_shell(&runtime.config, None, shell_mode) {
-                        Ok(child) => bridge(channel, child, runtime).await,
-                        Err(error) => Err(error),
-                    }
-                }
+                Operation::Exec(command) => match runtime.exec_shell(Some(&command), shell_mode) {
+                    Ok(child) => bridge(channel, child, runtime).await,
+                    Err(error) => Err(error),
+                },
+                Operation::Shell => match runtime.exec_shell(None, shell_mode) {
+                    Ok(child) => bridge(channel, child, runtime).await,
+                    Err(error) => Err(error),
+                },
                 Operation::Sftp if runtime.is_enforced() => Err(anyhow::anyhow!(
                     "SFTP is unsupported by the enforced transfer profile; use OpenShell upload/download"
                 )),

@@ -1,5 +1,5 @@
 use crate::config::{Config, RuntimeProfile, SandboxId};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use std::{net::IpAddr, path::PathBuf, process::Stdio, time::Duration};
 use tokio::process::{Child, Command};
@@ -398,6 +398,10 @@ fn private_json(value: &impl serde::Serialize) -> Result<tempfile::NamedTempFile
 }
 
 fn hosted_environment(command: &mut Command, config: &Config) {
+    command.env(
+        "OPENSHELL_KATA_HOSTED_RESOURCE_PROFILE",
+        config.hosted_resource_profile.name(),
+    );
     for name in [
         "OPENSHELL_KATA_NETWORK_POLICY_FILE",
         "OPENSHELL_KATA_RUNTIME_IDENTITY",
@@ -448,6 +452,69 @@ pub async fn enforce_hosted_network(
         &nonce,
         Some(policy),
     )
+}
+
+/// Apply an authenticated provider snapshot without writing credentials to host files.
+pub async fn enforce_hosted_providers(
+    config: &Config,
+    sandbox: &crate::proto::openshell::compute::v1::DriverSandbox,
+    identity: &str,
+    providers: &crate::network::ProviderAuthorization,
+) -> Result<crate::network::ProviderMaterial> {
+    use tokio::io::AsyncWriteExt;
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let mut command = Command::new(&config.lifecycle);
+    hosted_environment(&mut command, config);
+    command
+        .args(&config.lifecycle_arg)
+        .arg("apply-network")
+        .arg(&sandbox.id)
+        .arg("--proof-nonce")
+        .arg(&nonce)
+        .env("OPENSHELL_KATA_RUNTIME_IDENTITY", identity)
+        .env(
+            "OPENSHELL_KATA_GUEST_NETWORK_CIDR",
+            config.guest_network_cidr.as_deref().unwrap_or(""),
+        )
+        .env_remove("OPENSHELL_KATA_NETWORK_POLICY_FILE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let bytes = serde_json::to_vec(providers)?;
+    ensure!(
+        bytes.len() < 1024 * 1024,
+        "provider control input exceeds size limit"
+    );
+    let mut child = command
+        .spawn()
+        .context("starting provider control operation")?;
+    let mut input = child
+        .stdin
+        .take()
+        .context("provider control input missing")?;
+    let output = tokio::time::timeout(Duration::from_secs(15), async {
+        input.write_all(&bytes).await?;
+        input.shutdown().await?;
+        drop(input);
+        child.wait_with_output().await
+    })
+    .await
+    .context("provider control deadline exceeded")??;
+    ensure!(output.status.success(), "provider authorization failed");
+    let proof: crate::hosted::RuntimeProof = serde_json::from_slice(&output.stdout)?;
+    proof.validate_for_profile(
+        sandbox,
+        config.guest_image.as_deref().unwrap_or(""),
+        identity,
+        config.hosted_network_config.as_deref(),
+        &nonce,
+        Some(&crate::network::NetworkPolicy::default()),
+    )?;
+    proof
+        .broker
+        .and_then(|broker| broker.provider_material)
+        .context("provider material missing from proof")
 }
 
 async fn bounded_output(mut command: Command, duration: Duration) -> Result<std::process::Output> {

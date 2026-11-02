@@ -167,6 +167,9 @@ impl Fixture {
                 ..Default::default()
             };
         let shutdown = CancellationToken::new();
+        // The embedded proxy links both supported TLS backends; choose the same
+        // provider as the adapter before the standalone fixture creates TLS.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let future = Server::builder()
             .tls_config(ServerTlsConfig::new().identity(Identity::from_pem(
                 fs::read(root.join("server.crt"))?,
@@ -193,6 +196,7 @@ impl Fixture {
             additional_guest_images: Vec::new(),
             recovery_dir: None,
             hosted_network_config: None,
+            hosted_resource_profile: Default::default(),
             max_sandboxes: None,
         });
         let authentication = serde_json::to_vec(
@@ -689,6 +693,50 @@ async fn slow_boot_renews_nearly_expired_launch_credentials_before_ready() -> an
             .iter()
             .any(|value| value == "Bearer refreshed-credential")
     );
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_revision_race_retries_before_accepting_the_same_runtime() -> anyhow::Result<()> {
+    let fixture = Fixture::new(vec!["fixture-main".into()]).await?;
+    fixture.state.provider_races.store(1, Ordering::SeqCst);
+    fixture.runtime.start().await?;
+    fixture.phase(Phase::Ready).await?;
+    let reports = fixture.state.reports.lock().expect("reports").clone();
+    assert!(!reports.is_empty());
+    assert!(
+        reports
+            .iter()
+            .filter_map(|report| report.admission.as_ref())
+            .all(|admission| admission.instance_id == INSTANCE
+                && (admission.state != 2 || admission.provider_env_revision == 2))
+    );
+    assert_eq!(fixture.runtime.instance, INSTANCE);
+    let mut exit = fixture.runtime.main_exit.subscribe();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while exit.borrow_and_update().is_none() {
+            exit.changed().await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    assert!(fixture.files.path().join("main-ran").exists());
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn persistently_skewed_provider_snapshots_never_start_the_guest() -> anyhow::Result<()> {
+    let fixture = Fixture::new(vec!["fixture-main".into()]).await?;
+    fixture
+        .state
+        .provider_races
+        .store(usize::MAX, Ordering::SeqCst);
+    fixture.runtime.start().await?;
+    fixture.phase(Phase::Failed).await?;
+    assert!(!fixture.files.path().join("main-ran").exists());
+    assert!(fixture.state.reports.lock().expect("reports").is_empty());
     fixture.close().await;
     Ok(())
 }

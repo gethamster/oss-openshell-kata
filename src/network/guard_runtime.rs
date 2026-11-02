@@ -2,7 +2,7 @@
 
 use super::{
     HostedBrokerConfig, HostedControlRequest, HostedControlResponse, InfrastructureInventory,
-    MAX_DENIED, canonical_cidrs, canonical_uuid, digest, now,
+    MAX_DENIED, ProviderMaterial, canonical_cidrs, canonical_uuid, digest, now,
 };
 use crate::network::{
     BrokerHandle, NetworkPolicy,
@@ -11,10 +11,13 @@ use crate::network::{
 };
 use anyhow::{Context, Result, ensure};
 use futures::future::BoxFuture;
+use openshell_supervisor_network::provider_proxy::{
+    DestinationGuard, GatewayCredentials, GatewayEndpoint, ProviderProxy, ProxyOptions,
+};
 use std::{
     collections::BTreeSet,
     net::{IpAddr, SocketAddr},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex as StdMutex, RwLock},
     time::Duration,
 };
 use tokio::{sync::Mutex, task::JoinHandle, time::Instant};
@@ -116,6 +119,29 @@ impl AddressGuard {
         Ok(())
     }
 }
+impl DestinationGuard for AddressGuard {
+    fn check_host(&self, host: &str) -> std::result::Result<(), String> {
+        self.config
+            .check_host(host)
+            .map_err(|_| "protected infrastructure hostname forbidden".to_owned())
+    }
+    fn check(&self, addresses: &[SocketAddr]) -> std::result::Result<(), String> {
+        self.check(None)
+            .map_err(|_| "broker lease is inactive".to_owned())?;
+        for address in addresses {
+            self.check(Some(address.ip()))
+                .map_err(|_| "destination is outside public egress".to_owned())?;
+            if if_addrs::get_if_addrs()
+                .map_err(|_| "host address inventory unavailable".to_owned())?
+                .iter()
+                .any(|interface| interface.ip() == address.ip())
+            {
+                return Err("node-local destination forbidden".to_owned());
+            }
+        }
+        Ok(())
+    }
+}
 struct HostedConnector {
     guard: Arc<AddressGuard>,
     inner: Arc<dyn Connector>,
@@ -164,11 +190,15 @@ struct ControlState {
     denied: Vec<String>,
     authorization_expires: u64,
     stopping: bool,
+    provider_material: Option<ProviderMaterial>,
 }
 
 /// Trusted control handle. Every new process begins with no network authority.
 pub struct HostedBrokerHandle {
     broker: Option<BrokerHandle>,
+    provider: Arc<StdMutex<Option<Arc<ProviderProxy>>>>,
+    bind: SocketAddr,
+    tls_directory: tempfile::TempDir,
     config: Arc<HostedBrokerConfig>,
     config_sha256: String,
     startup_epoch: String,
@@ -181,8 +211,7 @@ impl HostedBrokerHandle {
     pub fn local_addr(&self) -> SocketAddr {
         self.broker
             .as_ref()
-            .expect("broker owned until shutdown")
-            .local_addr()
+            .map_or(self.bind, BrokerHandle::local_addr)
     }
     pub fn startup_epoch(&self) -> &str {
         &self.startup_epoch
@@ -215,13 +244,97 @@ impl HostedBrokerHandle {
             } else {
                 0
             },
-            active_connections: self
-                .broker
-                .as_ref()
-                .expect("broker active until shutdown")
-                .active_connections()
-                .await,
+            active_connections: self.active_connections().await,
             stopping: state.stopping,
+            provider_material: if active {
+                state.provider_material.clone()
+            } else {
+                None
+            },
+        })
+    }
+    async fn active_connections(&self) -> usize {
+        if let Some(broker) = &self.broker {
+            return broker.active_connections().await;
+        }
+        self.provider
+            .lock()
+            .expect("provider proxy lock poisoned")
+            .as_ref()
+            .map_or(0, |proxy| proxy.active_connections())
+    }
+    async fn deny_and_drain(&self) -> Result<()> {
+        if let Some(broker) = &self.broker {
+            return broker.deny_and_drain().await.map(|_| ());
+        }
+        if let Some(proxy) = self
+            .provider
+            .lock()
+            .expect("provider proxy lock poisoned")
+            .clone()
+        {
+            proxy
+                .revoke("provider authority revoked")
+                .map_err(|_| anyhow::anyhow!("provider revocation failed"))?;
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while self.active_connections().await != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .context("provider connections did not drain")?;
+        Ok(())
+    }
+    async fn apply_providers(
+        &self,
+        generation: u64,
+        providers: &super::ProviderAuthorization,
+    ) -> Result<ProviderMaterial> {
+        ensure!(
+            self.config.provider_mediation,
+            "provider mediation is not configured"
+        );
+        let existing = self
+            .provider
+            .lock()
+            .expect("provider proxy lock poisoned")
+            .clone();
+        let proxy = if let Some(proxy) = existing {
+            proxy
+        } else {
+            let credentials = GatewayCredentials::externally_managed(&providers.gateway_token)
+                .map_err(|_| anyhow::anyhow!("invalid gateway credential"))?;
+            let endpoint = GatewayEndpoint::new(self.config.gateway_endpoint.clone(), credentials)
+                .with_ca_certificate(self.config.gateway_ca_pem.as_bytes().to_vec());
+            let proxy = ProviderProxy::start(ProxyOptions {
+                sandbox_id: self.config.binding.sandbox_id.clone(),
+                bind: self.bind,
+                tls_directory: self.tls_directory.path().to_owned(),
+                gateway: Some(endpoint),
+                destination_guard: self.guard.clone(),
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("provider mediator failed to start"))?;
+            let proxy = Arc::new(proxy);
+            *self.provider.lock().expect("provider proxy lock poisoned") = Some(proxy.clone());
+            proxy
+        };
+        proxy
+            .update_gateway_credentials(&providers.gateway_token)
+            .map_err(|_| anyhow::anyhow!("gateway credential update failed"))?;
+        let material = proxy
+            .apply(generation, &providers.config, &providers.environment)
+            .map_err(|_| anyhow::anyhow!("provider snapshot rejected"))?;
+        Ok(ProviderMaterial {
+            environment: material.environment,
+            files: material.files,
+            ca_certificate: material.ca_certificate,
+            mediation_generation: material.mediation_generation,
+            config_revision: material.config_revision,
+            provider_revision: material.provider_revision,
+            policy_hash: material.policy_hash,
+            provider_attachment_epoch: material.provider_attachment_epoch,
         })
     }
     /// Process an exact-binding, process-epoch and generation-checked request.
@@ -241,9 +354,33 @@ impl HostedBrokerHandle {
         ensure!(!state.stopping, "broker has stopped");
         match &request {
             HostedControlRequest::Ready { .. } | HostedControlRequest::Inspect { .. } => {}
+            HostedControlRequest::AuthorizeProviders {
+                providers,
+                inventory,
+                ..
+            } => {
+                ensure!(
+                    self.config.provider_mediation,
+                    "provider mediation is not configured"
+                );
+                let mut rollback = self
+                    .authorize(&mut state, &NetworkPolicy::default(), inventory)
+                    .await?;
+                state.provider_material =
+                    Some(self.apply_providers(state.generation, providers).await?);
+                let result = self.response(&state, request.nonce()).await;
+                if result.is_ok() {
+                    rollback.disarm();
+                }
+                return result;
+            }
             HostedControlRequest::Authorize {
                 policy, inventory, ..
             } => {
+                ensure!(
+                    !self.config.provider_mediation,
+                    "provider snapshots are required"
+                );
                 let mut rollback = self.authorize(&mut state, policy, inventory).await?;
                 let result = self.response(&state, request.nonce()).await;
                 if result.is_ok() {
@@ -253,18 +390,9 @@ impl HostedBrokerHandle {
             }
             HostedControlRequest::Stop { .. } => {
                 self.guard.revoke();
-                self.broker
-                    .as_ref()
-                    .expect("broker active")
-                    .deny_and_drain()
-                    .await?;
+                self.deny_and_drain().await?;
                 ensure!(
-                    self.broker
-                        .as_ref()
-                        .expect("broker active")
-                        .active_connections()
-                        .await
-                        == 0,
+                    self.active_connections().await == 0,
                     "broker stop has not drained active connections"
                 );
                 state.generation = state
@@ -325,16 +453,17 @@ impl HostedBrokerHandle {
             denied.len() <= MAX_DENIED,
             "monotonic denied inventory exceeds limit"
         );
-        let broker = self.broker.as_ref().expect("broker active");
+
         let rollback = RevokeOnDrop {
             guard: self.guard.clone(),
+            provider: self.provider.clone(),
             armed: true,
         };
         let changes =
             state.policy != policy || state.denied != denied || !self.guard.active_at(time);
         if changes {
             self.guard.revoke();
-            broker.deny_and_drain().await?;
+            self.deny_and_drain().await?;
         }
         let time = now()?;
         inventory.validate_at(time)?;
@@ -350,7 +479,7 @@ impl HostedBrokerHandle {
             .context("broker generation overflow")?;
         // The new policy is never usable while the guard remains revoked. A
         // cancelled update can only leave deny-all, never a partial permission.
-        if changes {
+        if changes && let Some(broker) = &self.broker {
             broker.replace_policy(policy.clone()).await?;
         }
         self.guard.authorize(
@@ -367,11 +496,13 @@ impl HostedBrokerHandle {
             denied,
             authorization_expires: expires,
             stopping: false,
+            provider_material: state.provider_material.clone(),
         };
         Ok(rollback)
     }
     pub async fn shutdown(mut self) -> Result<()> {
         self.guard.revoke();
+        self.deny_and_drain().await?;
         self.stop_watch.cancel();
         if let Some(watch) = self.watch.take() {
             watch.await?;
@@ -385,12 +516,18 @@ impl HostedBrokerHandle {
 impl Drop for HostedBrokerHandle {
     fn drop(&mut self) {
         self.guard.revoke();
+        if let Ok(slot) = self.provider.lock()
+            && let Some(proxy) = slot.as_ref()
+        {
+            let _ = proxy.revoke("provider broker stopped");
+        }
         self.stop_watch.cancel();
     }
 }
 
 pub(crate) struct RevokeOnDrop {
     guard: Arc<AddressGuard>,
+    provider: Arc<StdMutex<Option<Arc<ProviderProxy>>>>,
     armed: bool,
 }
 impl RevokeOnDrop {
@@ -402,6 +539,11 @@ impl Drop for RevokeOnDrop {
     fn drop(&mut self) {
         if self.armed {
             self.guard.revoke();
+            if let Ok(slot) = self.provider.lock()
+                && let Some(proxy) = slot.as_ref()
+            {
+                let _ = proxy.revoke("provider control operation cancelled");
+            }
         }
     }
 }
@@ -409,6 +551,7 @@ impl HostedBrokerHandle {
     pub(crate) fn mutation_guard(&self) -> RevokeOnDrop {
         RevokeOnDrop {
             guard: self.guard.clone(),
+            provider: self.provider.clone(),
             armed: true,
         }
     }
@@ -435,6 +578,7 @@ async fn bind_hosted_with_connector(
     inventory: InfrastructureInventory,
     inner: Arc<dyn Connector>,
 ) -> Result<HostedBrokerHandle> {
+    crate::initialize_tls();
     let config = Arc::new(config.normalized()?);
     let time = now()?;
     ensure!(
@@ -474,27 +618,44 @@ async fn bind_hosted_with_connector(
             cancel,
         }),
     });
-    let broker = bind_with_connector(
-        address,
-        NetworkPolicy::default(),
-        Arc::new(HostedConnector {
-            guard: guard.clone(),
-            inner,
-        }),
-    )
-    .await?;
+    let broker = if config.provider_mediation {
+        None
+    } else {
+        Some(
+            bind_with_connector(
+                address,
+                NetworkPolicy::default(),
+                Arc::new(HostedConnector {
+                    guard: guard.clone(),
+                    inner,
+                }),
+            )
+            .await?,
+        )
+    };
+    let provider: Arc<StdMutex<Option<Arc<ProviderProxy>>>> = Arc::new(StdMutex::new(None));
+    let observed_provider = provider.clone();
     let stop_watch = CancellationToken::new();
     let stopped = stop_watch.clone();
     let watched = guard.clone();
     let watch = tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(25));
         loop {
-            tokio::select! {biased;()=stopped.cancelled()=>break,_=tick.tick()=>{match now(){Ok(time)=>watched.expire_at(time),Err(_)=>watched.revoke()}}}
+            tokio::select! {biased;()=stopped.cancelled()=>break,_=tick.tick()=>{
+                match now(){Ok(time)=>watched.expire_at(time),Err(_)=>watched.revoke()}
+                let next = now().is_ok_and(|time| watched.active_at(time));
+                if !next && let Some(proxy) = observed_provider.lock().expect("provider proxy lock poisoned").as_ref() {
+                    let _ = proxy.revoke("infrastructure lease expired");
+                }
+            }}
         }
     });
     Ok(HostedBrokerHandle {
         config_sha256: config.digest()?,
-        broker: Some(broker),
+        broker,
+        provider,
+        bind: address,
+        tls_directory: tempfile::tempdir()?,
         config,
         startup_epoch: uuid::Uuid::new_v4().to_string(),
         guard,
@@ -506,6 +667,7 @@ async fn bind_hosted_with_connector(
             denied,
             authorization_expires: 0,
             stopping: false,
+            provider_material: None,
         }),
         stop_watch,
         watch: Some(watch),

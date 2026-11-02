@@ -25,6 +25,8 @@ pub(super) struct Config {
     pub broker_namespace_uid: String,
     pub broker_image: String,
     pub guest_image: String,
+    #[serde(default)]
+    pub additional_guest_images: Vec<String>,
     pub operator_network_config_path: PathBuf,
     pub controller_namespace: String,
     pub controller_namespace_uid: String,
@@ -102,7 +104,15 @@ impl Config {
             self.broker_namespace == "openshell-network",
             "unexpected broker namespace"
         );
-        for image in [&self.broker_image, &self.guest_image] {
+        ensure!(
+            self.additional_guest_images.len() <= 16,
+            "too many admitted guest images"
+        );
+        for image in self
+            .additional_guest_images
+            .iter()
+            .chain([&self.broker_image, &self.guest_image])
+        {
             crate::hosted::validate_image(image)?;
         }
         ensure!(

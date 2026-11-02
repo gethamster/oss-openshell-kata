@@ -55,3 +55,10 @@ pub mod proto {
         }
     }
 }
+
+/// Select the same TLS implementation for standalone and embedded networking.
+pub(crate) fn initialize_tls() {
+    // The shared proxy also links aws-lc; make the runtime choice explicit before
+    // Tonic constructs a client or server instead of relying on feature inference.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}

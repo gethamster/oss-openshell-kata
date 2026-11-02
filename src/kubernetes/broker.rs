@@ -38,11 +38,19 @@ pub(super) fn intent(state: &State, namespace: &Value, config: &Config) -> Resul
             .context("initial network policy file required")?,
     ))?;
     ensure!(
-        initial.is_subset_of(&config.operator_ceiling)?,
+        config.provider_mediation && initial.tcp_allow.is_empty()
+            || initial.is_subset_of(&config.operator_ceiling)?,
         "initial network policy exceeds operator ceiling"
     );
     let network = HostedBrokerConfig {
         version: 1,
+        provider_mediation: config.provider_mediation,
+        gateway_endpoint: config.gateway_endpoint.clone(),
+        gateway_ca_pem: if config.provider_mediation {
+            std::fs::read_to_string(&config.gateway_ca_file)?
+        } else {
+            String::new()
+        },
         operator_ceiling: config.operator_ceiling.clone(),
         initial_ceiling: initial,
         binding: BrokerBinding {
@@ -443,6 +451,62 @@ pub(super) async fn authorize_with_config(
         ..state.clone()
     })
 }
+pub(super) async fn authorize_providers(
+    client: &Client,
+    state: &State,
+    providers: crate::network::ProviderAuthorization,
+    nonce: &str,
+) -> Result<State> {
+    let binding = state
+        .broker
+        .as_ref()
+        .context("sandbox has no provider broker")?;
+    let config = config(binding)?;
+    ensure!(
+        config.provider_mediation,
+        "provider mediation is not configured"
+    );
+    let inventory: InfrastructureInventory = broker_config::read_json(&config.inventory_file)?;
+    inventory.validate_at(lease::now()?)?;
+    let previous = inspect(client, binding, &uuid::Uuid::new_v4().to_string()).await?;
+    let request = HostedControlRequest::AuthorizeProviders {
+        binding: previous.binding,
+        startup_epoch: previous.startup_epoch,
+        expected_generation: previous.generation,
+        nonce: nonce.into(),
+        providers,
+        inventory: inventory.clone(),
+    };
+    client
+        .apply(&broker_manifest::network_policy(
+            binding, &config, &inventory,
+        )?)
+        .await?;
+    let response = exec(client, binding, "hosted-authorize", Some(&request), nonce).await?;
+    ensure!(
+        response.provider_material.is_some()
+            && response.policy.tcp_allow.is_empty()
+            && response.generation
+                == previous
+                    .generation
+                    .checked_add(1)
+                    .context("broker generation overflow")?
+            && response.inventory_generation == inventory.generation
+            && response.inventory_sha256 == inventory.digest()?
+            && response.authorization_expires_at_unix > lease::now()?,
+        "provider authorization proof differs"
+    );
+    let next = Binding {
+        inventory: Some(inventory),
+        response: Some(response),
+        ..binding.clone()
+    };
+    Ok(State {
+        broker: Some(next),
+        ..state.clone()
+    })
+}
+
 pub(super) async fn validate_resources(client: &Client, binding: &Binding) -> Result<()> {
     observe(client, binding).await?;
     let config = config(binding)?;

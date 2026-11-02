@@ -95,7 +95,12 @@ pub(super) fn install(
     drop((ingress, egress));
     verify(config, &proof)
 }
-fn attach(ebpf: &mut Ebpf, name: &str, interface: &str, direction: TcAttachType) -> Result<FdLink> {
+pub(super) fn attach(
+    ebpf: &mut Ebpf,
+    name: &str,
+    interface: &str,
+    direction: TcAttachType,
+) -> Result<FdLink> {
     let program: &mut SchedClassifier = ebpf
         .program_mut(name)
         .context("TCX program absent")?

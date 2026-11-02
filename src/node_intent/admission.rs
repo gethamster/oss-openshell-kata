@@ -239,6 +239,13 @@ pub(super) fn derive(config: &Config, guest: &Value, launch: &Launch) -> Result<
         "operator broker namespace differs"
     );
     let expected = HostedBrokerConfig {
+        provider_mediation: operator.provider_mediation,
+        gateway_endpoint: operator.gateway_endpoint.clone(),
+        gateway_ca_pem: if operator.provider_mediation {
+            std::fs::read_to_string(&operator.gateway_ca_file)?
+        } else {
+            String::new()
+        },
         operator_ceiling: operator.operator_ceiling.clone(),
         baseline_denied_cidrs: operator.baseline_denied_cidrs.clone(),
         protected_hostname_suffixes: operator.protected_hostname_suffixes.clone(),
@@ -340,11 +347,18 @@ fn validate_guest(
     let init = guest["spec"]["initContainers"]
         .as_array()
         .context("guest storage initializer missing")?;
+    let image = containers
+        .first()
+        .and_then(|container| container["image"].as_str());
     ensure!(
         containers.len() == 1
-            && containers[0]["image"] == config.guest_image
             && init.len() == 1
-            && init[0]["image"] == config.guest_image,
+            && image.is_some_and(|image| image == config.guest_image
+                || config
+                    .additional_guest_images
+                    .iter()
+                    .any(|allowed| allowed == image))
+            && init[0]["image"] == containers[0]["image"],
         "guest image inventory differs"
     );
     let now = super::host::now()?;

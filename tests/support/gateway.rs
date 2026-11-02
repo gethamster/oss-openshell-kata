@@ -25,6 +25,7 @@ pub struct State {
     pub control: Mutex<Option<mpsc::Sender<Result<o::GatewayMessage, Status>>>>,
     pub relay_data: Mutex<Vec<u8>>,
     pub retry_configs: AtomicUsize,
+    pub provider_races: AtomicUsize,
     pub refresh_calls: AtomicUsize,
     pub initial_expires: Mutex<Option<std::time::Instant>>,
     pub refreshed: Notify,
@@ -224,6 +225,21 @@ where
                 state,
                 request,
                 |state, _: Request<o::GetSandboxProviderEnvironmentRequest>| {
+                    if state
+                        .provider_races
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                            count.checked_sub(1)
+                        })
+                        .is_ok()
+                    {
+                        let mut snapshot = state.snapshot.lock().expect("fixture snapshot");
+                        snapshot.provider_env_revision += 1;
+                        state
+                            .providers
+                            .lock()
+                            .expect("fixture providers")
+                            .provider_env_revision = snapshot.provider_env_revision;
+                    }
                     Ok(state.providers.lock().expect("fixture providers").clone())
                 },
             ),

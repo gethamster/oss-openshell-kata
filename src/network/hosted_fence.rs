@@ -1,8 +1,13 @@
 //! Host-owned TCX packet fencing before the Kata shim can boot a guest.
 
+#[path = "hosted_fence_bootstrap.rs"]
+mod hosted_fence_bootstrap;
 #[cfg(target_os = "linux")]
 #[path = "hosted_fence_linux.rs"]
 mod hosted_fence_linux;
+#[cfg(target_os = "linux")]
+#[path = "hosted_fence_probe.rs"]
+mod hosted_fence_probe;
 #[path = "hosted_fence_runtime.rs"]
 mod hosted_fence_runtime;
 #[path = "hosted_fence_packet.rs"]

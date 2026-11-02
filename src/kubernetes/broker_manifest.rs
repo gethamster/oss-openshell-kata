@@ -30,7 +30,7 @@ pub(super) fn pod(binding: &Binding, expires: u64) -> Result<Value> {
         "securityContext":{"runAsNonRoot":true,"runAsUser":10001,"runAsGroup":10001,"fsGroup":10001,"seccompProfile":{"type":"RuntimeDefault"}},
         "initContainers":[{"name":"control-permissions","image":binding.image,"command":["sh","-ec","umask 077; mkdir /run/broker/private"],"resources":{"requests":{"cpu":"10m","memory":"16Mi","ephemeral-storage":"128Mi"},"limits":{"cpu":"100m","memory":"32Mi","ephemeral-storage":"128Mi"}},"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"volumeMounts":[{"name":"control","mountPath":"/run/broker"}]}],
         "containers":[{"name":"broker","image":binding.image,"command":["kata-network"],"args":["broker-hosted","--bind","$(POD_IP):3128","--config","/broker-config/config.json","--inventory","/broker-inventory/inventory.json","--control","/run/broker/private/control.sock"],
-        "env":[{"name":"POD_IP","valueFrom":{"fieldRef":{"apiVersion":"v1","fieldPath":"status.podIP"}}}],
+        "env":[{"name":"POD_IP","valueFrom":{"fieldRef":{"apiVersion":"v1","fieldPath":"status.podIP"}}},{"name":"TMPDIR","value":"/run/broker/private"}],
         "securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},
         "resources":{"requests":{"cpu":"100m","memory":"64Mi","ephemeral-storage":"128Mi"},"limits":{"cpu":"1","memory":"128Mi","ephemeral-storage":"128Mi"}},
         "volumeMounts":[{"name":"control","mountPath":"/run/broker"},{"name":"config","mountPath":"/broker-config","readOnly":true},{"name":"inventory","mountPath":"/broker-inventory","readOnly":true}]}],
@@ -110,7 +110,14 @@ pub(super) fn network_policy(
     let mut egress = vec![
         json!({"to":[{"namespaceSelector":{"matchLabels":config.resolver_namespace_labels},"podSelector":{"matchLabels":config.resolver_pod_labels}}],"ports":[{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]}),
     ];
-    if !ports.is_empty() {
+    if config.provider_mediation {
+        let endpoint = tonic::transport::Endpoint::from_shared(config.gateway_endpoint.clone())?;
+        let port = endpoint.uri().port_u16().unwrap_or(443);
+        egress.push(json!({"to":config.gateway_addresses.iter().map(|ip|json!({"ipBlock":{"cidr":format!("{ip}/32")}})).collect::<Vec<_>>(),"ports":[{"protocol":"TCP","port":port}]}));
+        egress.push(
+            json!({"to":[{"ipBlock":{"cidr":"0.0.0.0/0","except":denied(config,inventory)}}]}),
+        );
+    } else if !ports.is_empty() {
         egress.push(json!({"to":[{"ipBlock":{"cidr":"0.0.0.0/0","except":denied(config,inventory)}}],"ports":ports.into_iter().map(|port|json!({"protocol":"TCP","port":port})).collect::<Vec<_>>()}));
     }
     Ok(

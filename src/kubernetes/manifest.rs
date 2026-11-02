@@ -24,7 +24,10 @@ pub(super) fn metadata(name: &str, namespace: &str) -> Value {
 }
 
 pub(super) fn limits() -> Value {
-    json!({"cpu":"2","memory":"4Gi","ephemeral-storage":"1Gi"})
+    let owner =
+        std::env::var("OPENSHELL_KATA_HOSTED_RESOURCE_PROFILE").as_deref() == Ok("owner-4cpu-8gib");
+    let (cpu, memory) = if owner { ("4", "8Gi") } else { ("2", "4Gi") };
+    json!({"cpu":cpu,"memory":memory,"ephemeral-storage":"1Gi"})
 }
 
 pub(super) fn network_policy(name: &str, namespace: &str, control_namespace: &str) -> Value {

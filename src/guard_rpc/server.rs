@@ -113,6 +113,7 @@ pub(super) fn router(server: ProofServer) -> NodeFenceProofServer<ProofServer> {
         .max_encoding_message_size(MAX_PROOF + 16)
 }
 pub(super) fn tls(config: &GuardServerConfig) -> Result<ServerTlsConfig> {
+    crate::initialize_tls();
     Ok(ServerTlsConfig::new()
         .identity(Identity::from_pem(
             read_file(&config.certificate_file, FileKind::Public)?,

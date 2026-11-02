@@ -8,6 +8,7 @@ use crate::{
     ssh,
 };
 use anyhow::{Context, Result, bail};
+use prost::Message;
 use serde::Deserialize;
 use std::{
     collections::VecDeque,
@@ -205,6 +206,7 @@ pub struct Runtime {
     pub operation_slots: Arc<tokio::sync::Semaphore>,
     operator_policy: Option<crate::profile::VmPolicy>,
     hosted_network: Option<crate::hosted_network::RuntimeNetwork>,
+    provider_material: RwLock<Option<crate::network::ProviderMaterial>>,
     pub cancel: CancellationToken,
     pub phase: watch::Sender<Phase>,
     pub output: broadcast::Sender<Output>,
@@ -283,6 +285,7 @@ impl Runtime {
             vm_policy,
             operator_policy,
             hosted_network,
+            provider_material: RwLock::new(None),
             transfer_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             operation_slots: Arc::new(tokio::sync::Semaphore::new(32)),
             cancel: CancellationToken::new(),
@@ -367,6 +370,7 @@ impl Runtime {
         Ok(request)
     }
     async fn client(&self) -> Result<o::open_shell_client::OpenShellClient<Channel>> {
+        crate::initialize_tls();
         let ca = tokio::fs::read(&self.config.gateway_ca).await?;
         let channel = Endpoint::from_shared(self.config.gateway.clone())?
             .connect_timeout(Duration::from_secs(10))
@@ -415,7 +419,7 @@ impl Runtime {
             }
         };
         let mut applied = self.vm_policy.clone();
-        self.check_providers(&mut client, &snapshot).await?;
+        let snapshot = self.check_providers(&mut client, snapshot).await?;
         let mut attempt = 0;
         // A boot burst can delay the first proof; a missed deadline is retried, a
         // verified mismatch is not.
@@ -490,7 +494,7 @@ impl Runtime {
                                 let mut request = self.request(s::GetSandboxConfigRequest { name:self.spec.name.clone(), ..Default::default() })?;
                                 request.set_timeout(Duration::from_secs(10));
                                 let effective = client.get_sandbox_config(request).await?.into_inner();
-                                self.check_providers(&mut client,&effective).await?;
+                                let effective = self.check_providers(&mut client,effective).await?;
                                 // Policy changes apply at once; unchanged native guests are
                                 // re-proven on a slower cadence to bound host load at fleet scale.
                                 let proven = self.operator_policy.is_none()
@@ -548,6 +552,11 @@ impl Runtime {
         applied: &mut Option<crate::profile::VmPolicy>,
     ) -> Result<()> {
         if let Some(network) = &self.hosted_network {
+            if network.provider_mediation() {
+                network.compile(snapshot)?;
+                return crate::guest::verify_runtime(&self.config, &self.spec, &self.instance)
+                    .await;
+            }
             let policy = network.compile(snapshot)?;
             return crate::guest::enforce_hosted_network(
                 &self.config,
@@ -597,17 +606,82 @@ impl Runtime {
     async fn check_providers(
         &self,
         client: &mut o::open_shell_client::OpenShellClient<Channel>,
-        snapshot: &s::GetSandboxConfigResponse,
-    ) -> Result<()> {
-        let providers = client
-            .get_sandbox_provider_environment(self.request(
-                o::GetSandboxProviderEnvironmentRequest {
-                    sandbox_id: self.id.to_string(),
+        mut snapshot: s::GetSandboxConfigResponse,
+    ) -> Result<s::GetSandboxConfigResponse> {
+        // Attachment and credential updates can land between these two RPCs.
+        // Re-read the pair before interpreting a normal revision race as a
+        // failed runtime; no mixed pair may reach the mediator or acceptance.
+        let mut providers = None;
+        for attempt in 0..4 {
+            let mut request = self.request(o::GetSandboxProviderEnvironmentRequest {
+                sandbox_id: self.id.to_string(),
+                ..Default::default()
+            })?;
+            request.set_timeout(Duration::from_secs(5));
+            let candidate = client
+                .get_sandbox_provider_environment(request)
+                .await?
+                .into_inner();
+            if candidate.provider_env_revision == snapshot.provider_env_revision
+                && candidate.provider_attachment_epoch == snapshot.provider_attachment_epoch
+                && candidate.policy_hash == snapshot.policy_hash
+            {
+                providers = Some(candidate);
+                break;
+            }
+            if attempt < 3 {
+                let mut request = self.request(s::GetSandboxConfigRequest {
+                    name: self.spec.name.clone(),
                     ..Default::default()
-                },
-            )?)
-            .await?
-            .into_inner();
+                })?;
+                request.set_timeout(Duration::from_secs(5));
+                snapshot = client.get_sandbox_config(request).await?.into_inner();
+            }
+        }
+        let providers =
+            providers.context("provider configuration did not stabilize within its retry bound")?;
+        if self
+            .hosted_network
+            .as_ref()
+            .is_some_and(|network| network.provider_mediation())
+        {
+            self.hosted_network
+                .as_ref()
+                .context("provider network missing")?
+                .compile(&snapshot)?;
+            let token = self
+                .gateway_token
+                .read()
+                .map_err(|_| anyhow::anyhow!("runtime credential unavailable"))?
+                .token
+                .clone();
+            let request = crate::network::ProviderAuthorization {
+                config: snapshot.encode_to_vec(),
+                environment: providers.encode_to_vec(),
+                gateway_token: token,
+            };
+            let material = crate::guest::enforce_hosted_providers(
+                &self.config,
+                &self.spec,
+                &self.instance,
+                &request,
+            )
+            .await?;
+            anyhow::ensure!(
+                material.config_revision == snapshot.config_revision
+                    && material.provider_revision == snapshot.provider_env_revision
+                    && material.provider_attachment_epoch == snapshot.provider_attachment_epoch
+                    && material.policy_hash == snapshot.policy_hash,
+                "provider receipt differs from admitted snapshot"
+            );
+            self.install_provider_material(&material).await?;
+            *self
+                .provider_material
+                .write()
+                .map_err(|_| anyhow::anyhow!("provider material lock unavailable"))? =
+                Some(material);
+            return Ok(snapshot);
+        }
         if !providers.environment.is_empty()
             || !providers.dynamic_credentials.is_empty()
             || !providers.static_credential_bindings.is_empty()
@@ -619,8 +693,110 @@ impl Runtime {
         {
             bail!("provider snapshot is unsupported or does not match effective configuration");
         }
+        Ok(snapshot)
+    }
+    async fn install_provider_material(
+        &self,
+        material: &crate::network::ProviderMaterial,
+    ) -> Result<()> {
+        let unchanged = self
+            .provider_material
+            .read()
+            .map_err(|_| anyhow::anyhow!("provider material lock unavailable"))?
+            .as_ref()
+            .is_some_and(|old| {
+                old.environment == material.environment
+                    && old.files == material.files
+                    && old.ca_certificate == material.ca_certificate
+            });
+        if unchanged {
+            return Ok(());
+        }
+        let directory = "/sandbox/.openshell";
+        let mut command = format!(
+            "umask 077; mkdir -p {directory}; {{ cat /etc/ssl/certs/ca-certificates.crt; printf %s {}; }} > {directory}/provider-ca.pem.tmp && mv {directory}/provider-ca.pem.tmp {directory}/provider-ca.pem",
+            shell_quote(&material.ca_certificate)
+        );
+        for (path, value) in &material.files {
+            anyhow::ensure!(
+                path.starts_with("/sandbox/")
+                    && !path.split('/').any(|part| part == ".." || part == ".")
+                    && !path.contains('\0'),
+                "provider file is outside guest home"
+            );
+            let parent = std::path::Path::new(path)
+                .parent()
+                .and_then(|value| value.to_str())
+                .context("provider file parent missing")?;
+            command.push_str(&format!(
+                " && mkdir -p {} && printf %s {} > {}",
+                shell_quote(parent),
+                shell_quote(value),
+                shell_quote(path)
+            ));
+        }
+        let mut child = self.guest.exec(&self.config, &command)?;
+        child.stdin.take();
+        child.stdout.take();
+        child.stderr.take();
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .context("provider material install timed out")??;
+        anyhow::ensure!(status.success(), "provider material install failed");
         Ok(())
     }
+
+    fn with_provider_environment(&self, command: &str) -> Result<String> {
+        let material = self
+            .provider_material
+            .read()
+            .map_err(|_| anyhow::anyhow!("provider material lock unavailable"))?;
+        let Some(material) = material.as_ref() else {
+            return Ok(command.into());
+        };
+        let mut environment = material.environment.clone();
+        for key in [
+            "SSL_CERT_FILE",
+            "CURL_CA_BUNDLE",
+            "REQUESTS_CA_BUNDLE",
+            "NODE_EXTRA_CA_CERTS",
+        ] {
+            environment.insert(key.into(), "/sandbox/.openshell/provider-ca.pem".into());
+        }
+        let mut prefix = String::from("exec /usr/bin/env");
+        for (key, value) in environment {
+            anyhow::ensure!(
+                !key.is_empty()
+                    && key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                    && !key.as_bytes()[0].is_ascii_digit()
+                    && !value.contains('\0'),
+                "invalid provider environment"
+            );
+            prefix.push(' ');
+            prefix.push_str(&shell_quote(&format!("{key}={value}")));
+        }
+        Ok(format!("{prefix} /bin/bash -c {}", shell_quote(command)))
+    }
+
+    pub(crate) fn exec_shell(
+        &self,
+        command: Option<&str>,
+        mode: crate::guest::ShellMode,
+    ) -> Result<tokio::process::Child> {
+        let invocation = match mode {
+            crate::guest::ShellMode::Login => "exec /bin/bash -l",
+            crate::guest::ShellMode::NonLogin => {
+                "exec /usr/bin/env -u BASH_ENV -u ENV /bin/bash --noprofile --norc"
+            }
+        };
+        let command = command.map_or_else(
+            || invocation.to_owned(),
+            |command| format!("{invocation} -c {}", shell_quote(command)),
+        );
+        self.guest
+            .exec(&self.config, &self.with_provider_environment(&command)?)
+    }
+
     async fn report_accepted(
         &self,
         client: &mut o::open_shell_client::OpenShellClient<Channel>,
@@ -667,7 +843,9 @@ impl Runtime {
         if command.is_empty() {
             bail!("canonical main command required");
         }
-        let mut child = self.guest.exec(&self.config, &command)?;
+        let mut child = self
+            .guest
+            .exec(&self.config, &self.with_provider_environment(&command)?)?;
         // The canonical main process is noninteractive in this bounded adapter.
         child.stdin.take();
         let stdout = child.stdout.take().context("main stdout unavailable")?;
