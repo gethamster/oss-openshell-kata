@@ -1,6 +1,6 @@
 //! Pinned guest SSH transport independent of containerd execution streams.
 
-use super::command::Node;
+use super::command::{Node, NodeTransport};
 use super::state::StateDirectory;
 use crate::guest::Guest;
 use anyhow::{Context, Result, bail};
@@ -104,7 +104,7 @@ pub async fn open_tunnel(
         "-oServerAliveCountMax=3".into(),
         "-L".into(),
         format!("127.0.0.1:{}:{destination}:22", guest.port).into(),
-        format!("lima-{}", node.vm()).into(),
+        node_destination(node).into(),
     ];
     node.command("ssh", &args, TUNNEL_START_TIMEOUT).await?;
     Ok(())
@@ -191,12 +191,22 @@ pub async fn wait_ready(node: &Node, guest: &Guest) -> Result<()> {
 }
 
 fn node_ssh_config(node: &Node) -> Result<PathBuf> {
+    if node.transport() == NodeTransport::LinuxLocal {
+        return Ok(PathBuf::from("/etc/openshell-kata/node-ssh.config"));
+    }
     let home = std::env::var_os("HOME").context("HOME is required for the local node transport")?;
     let home = PathBuf::from(home);
     if !home.is_absolute() {
         bail!("HOME must be absolute for the local node transport");
     }
     Ok(home.join(".lima").join(node.vm()).join("ssh.config"))
+}
+
+fn node_destination(node: &Node) -> String {
+    match node.transport() {
+        NodeTransport::Lima => format!("lima-{}", node.vm()),
+        NodeTransport::LinuxLocal => "openshell-kata-linux".to_owned(),
+    }
 }
 
 fn tunnel_command(config: &Path, socket: &Path, operation: &str, node: &Node) -> Vec<OsString> {
@@ -207,7 +217,7 @@ fn tunnel_command(config: &Path, socket: &Path, operation: &str, node: &Node) ->
         socket.as_os_str().to_owned(),
         "-O".into(),
         operation.into(),
-        format!("lima-{}", node.vm()).into(),
+        node_destination(node).into(),
     ]
 }
 
@@ -292,6 +302,20 @@ mod tests {
             enforcement: None,
             runtime_identity: None,
         }
+    }
+
+    #[test]
+    fn native_node_tunnel_uses_fixed_operator_config_without_lima() {
+        let node = Node::with_transport("native", NodeTransport::LinuxLocal).expect("node");
+        let config = node_ssh_config(&node).expect("fixed config");
+        assert_eq!(config, PathBuf::from("/etc/openshell-kata/node-ssh.config"));
+        let args = tunnel_command(&config, Path::new("/tmp/control.sock"), "check", &node);
+        assert_eq!(args.last(), Some(&OsString::from("openshell-kata-linux")));
+        assert!(
+            !args
+                .iter()
+                .any(|value| value.to_string_lossy().contains("lima-"))
+        );
     }
 
     #[test]

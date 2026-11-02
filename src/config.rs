@@ -30,6 +30,9 @@ impl fmt::Display for SandboxId {
     }
 }
 
+/// Upper bound on the operator-selected native node capacity (`--max-sandboxes`).
+pub const MAX_SANDBOXES_LIMIT: u8 = 64;
+
 /// Operator configuration; no workload input can select host commands.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum RuntimeProfile {
@@ -76,6 +79,11 @@ pub struct Config {
     /// Explicit operator profile for brokered hosted TCP; absent means deny-all.
     #[arg(long)]
     pub hosted_network_config: Option<PathBuf>,
+    /// Operator capacity of the native node: the most retained sandboxes, stopped
+    /// guests included, it admits at once. Required with native recovery. The
+    /// lifecycle reads the same `OPENSHELL_KATA_MAX_SANDBOXES` service setting.
+    #[arg(long, env = "OPENSHELL_KATA_MAX_SANDBOXES", value_parser = clap::value_parser!(u8).range(1..=i64::from(MAX_SANDBOXES_LIMIT)))]
+    pub max_sandboxes: Option<u8>,
 }
 impl Config {
     /// The operator-admitted guest images: the default image first, then any additional ones.
@@ -154,6 +162,31 @@ impl Config {
             }
             crate::hosted::validate_image(image)?;
         }
+        if self.runtime_profile == RuntimeProfile::Local
+            && let Some(directory) = &self.recovery_dir
+            && (!directory.is_absolute()
+                || self.prototype_policy_mode
+                || self.vm_policy.is_none()
+                || self.guest_image.is_none())
+        {
+            bail!(
+                "native recovery requires an absolute directory, enforced policy and pinned guest image"
+            );
+        }
+        let native_recovery =
+            self.runtime_profile == RuntimeProfile::Local && self.recovery_dir.is_some();
+        match self.max_sandboxes {
+            None if native_recovery => {
+                bail!("native recovery requires an explicit --max-sandboxes node capacity")
+            }
+            Some(_) if !native_recovery => {
+                bail!("--max-sandboxes applies only to the native local runtime with recovery")
+            }
+            Some(capacity) if !(1..=MAX_SANDBOXES_LIMIT).contains(&capacity) => {
+                bail!("--max-sandboxes must be between 1 and {MAX_SANDBOXES_LIMIT}")
+            }
+            _ => {}
+        }
         if self.runtime_profile == RuntimeProfile::Kubernetes {
             if self
                 .recovery_dir
@@ -204,7 +237,17 @@ impl Config {
     ) -> Result<()> {
         match self.runtime_profile {
             RuntimeProfile::Local => {
-                crate::admission::validate_request(sandbox, self.prototype_policy_mode)
+                if let Some(path) = &self.vm_policy {
+                    let policy = crate::profile::VmPolicy::load(path)?;
+                    crate::admission::compile_request_for_images(
+                        sandbox,
+                        &policy,
+                        &self.admitted_images(),
+                    )
+                    .map(|_| ())
+                } else {
+                    crate::admission::validate_request(sandbox, self.prototype_policy_mode)
+                }
             }
             RuntimeProfile::Kubernetes => {
                 if let Some(path) = &self.hosted_network_config {

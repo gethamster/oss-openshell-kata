@@ -23,6 +23,7 @@ fn config(root: &std::path::Path) -> Arc<Config> {
         additional_guest_images: Vec::new(),
         recovery_dir: None,
         hosted_network_config: None,
+        max_sandboxes: None,
     })
 }
 fn sandbox(authentication: Vec<u8>) -> c::DriverSandbox {

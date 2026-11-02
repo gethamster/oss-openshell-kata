@@ -9,7 +9,6 @@ use std::{
     ffi::OsString,
     net::Ipv4Addr,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 fn args(values: &[&str]) -> Vec<OsString> {
@@ -178,20 +177,35 @@ impl Attachment {
             gateway_ip: Ipv4Addr::new(10, 205, third, fourth + 1),
         }
     }
+    /// Root-namespace name of the guest end of the veth pair before it moves into
+    /// the guest namespace; unique per attachment so concurrent creates never collide.
+    pub fn peer(&self) -> String {
+        format!("okp{}", &self.host_veth[3..])
+    }
     pub fn namespace_path(&self) -> String {
         format!("/run/netns/{}", self.netns)
     }
 }
 
 /// Plan the complete generation identity without changing node resources.
-pub async fn plan_attachment(node: &Node, id: &str, nonce: &str) -> Result<Attachment> {
+///
+/// `reserved` holds gateway addresses retained by other guests whose links may be
+/// absent (stopped across a reboot, or planned by a concurrent create).
+pub async fn plan_attachment(
+    node: &Node,
+    id: &str,
+    nonce: &str,
+    reserved: &[Ipv4Addr],
+) -> Result<Attachment> {
     let all = node.node(&args(&["ip", "-j", "address", "show"])).await?;
     let occupied = String::from_utf8(all.stdout)?;
     let digest = Sha256::digest(id.as_bytes());
     let seed = u16::from_be_bytes([digest[0], digest[1]]) % 16384;
     (0..16384)
         .map(|offset| Attachment::for_id(id, nonce, (seed + offset) % 16384))
-        .find(|a| !occupied.contains(&a.gateway_ip.to_string()))
+        .find(|a| {
+            !reserved.contains(&a.gateway_ip) && !occupied.contains(&a.gateway_ip.to_string())
+        })
         .context("no private network allocation available")
 }
 
@@ -213,7 +227,8 @@ pub async fn create_attachment(
         &format!("{}/netns-owner.json", job_directory(id)),
     )
     .await?;
-    let peer = "okpeer0";
+    let peer = attachment.peer();
+    let peer = peer.as_str();
     node.node(&args(&[
         "ip",
         "link",
@@ -346,27 +361,10 @@ pub async fn create_attachment(
 pub async fn put_json<T: Serialize>(node: &Node, value: &T, destination: &str) -> Result<()> {
     let temporary = tempfile::NamedTempFile::new()?;
     std::fs::write(temporary.path(), serde_json::to_vec(value)?)?;
-    let stage = node
-        .command(
-            "limactl",
-            &args(&["shell", node.vm(), "mktemp", "/tmp/osk-transfer.XXXXXXXX"]),
-            Duration::from_secs(15),
-        )
-        .await?;
-    let stage = String::from_utf8(stage.stdout)?.trim().to_owned();
-    node.command(
-        "limactl",
-        &[
-            OsString::from("cp"),
-            temporary.path().as_os_str().to_owned(),
-            OsString::from(format!("{}:{stage}", node.vm())),
-        ],
-        Duration::from_secs(30),
-    )
-    .await?;
+    let stage = node.stage(temporary.path()).await?;
     node.node(&args(&["install", "-D", "-m", "0644", &stage, destination]))
         .await?;
-    node.node(&args(&["rm", "--", &stage])).await?;
+    node.unstage(&stage).await?;
     Ok(())
 }
 
@@ -664,6 +662,16 @@ pub async fn stop_unit(node: &Node, name: &str) -> Result<()> {
         bail!("owned service process remains");
     }
     Ok(())
+}
+
+/// Confirm both volatile attachment objects are absent; partial loss fails closed.
+pub async fn attachment_absent(node: &Node, attachment: &Attachment) -> Result<bool> {
+    let namespace = exists(node, &attachment.namespace_path()).await?;
+    let link = exists(node, &format!("/sys/class/net/{}", attachment.host_veth)).await?;
+    if namespace != link {
+        bail!("runtime network attachment is partially missing");
+    }
+    Ok(!namespace)
 }
 
 async fn exists(node: &Node, path: &str) -> Result<bool> {

@@ -1,7 +1,8 @@
 //! Native lifecycle transactions, bound to host observations and one creation nonce.
+mod boot;
 use super::observation::{host_process, storage_device, verify_storage};
 use super::{
-    command::Node,
+    command::{Node, NodeTransport},
     model::{self, Action, Record, Route},
     network::{self},
     state::{StateDirectory, validate_id},
@@ -12,6 +13,7 @@ use crate::{
     profile::{EnforcementEvidence, VmPolicy},
 };
 use anyhow::{Context, Result, bail};
+use boot::{node_boot_id, recover_boot_network};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -41,9 +43,13 @@ fn unit(id: &str) -> String {
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub vm: String,
+    pub node_transport: NodeTransport,
+    pub resource_profile: model::ResourceProfile,
     pub state_dir: PathBuf,
     pub node_binary: PathBuf,
     pub image: Option<String>,
+    /// Operator node capacity in retained guests, stopped guests included.
+    pub max_sandboxes: Option<u8>,
 }
 
 /// A persistent expiry job, run outside the guest and outside the adapter process.
@@ -64,23 +70,129 @@ pub async fn execute(
 ) -> Result<Value> {
     validate_id(id)?;
     let state = StateDirectory::new(&settings.state_dir)?;
-    let lockpath = state.root().join(".lock");
-    if std::fs::symlink_metadata(&lockpath).is_ok_and(|m| m.file_type().is_symlink()) {
-        bail!("invalid lifecycle lock");
+    // Operations on one sandbox stay ordered; distinct sandboxes proceed in parallel.
+    let sandbox_lock = LifecycleLock::acquire(state.root().join(format!(".lock-{id}"))).await?;
+    let result = execute_locked(settings, &state, action, id, policy_path, nonce).await;
+    if !state.path(id)?.try_exists()? {
+        // Retire the lock with its sandbox while still holding it; waiters re-open.
+        sandbox_lock.retire()?;
     }
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(lockpath)?;
-    let _lock = tokio::task::spawn_blocking(move || -> Result<File> {
-        file.lock()?;
-        Ok(file)
-    })
-    .await??;
-    let node = Node::new(&settings.vm)?;
+    result
+}
+
+/// An exclusive advisory lock file that waiters re-open if it is retired under them.
+struct LifecycleLock {
+    path: PathBuf,
+    _file: File,
+}
+
+impl LifecycleLock {
+    async fn acquire(path: PathBuf) -> Result<Self> {
+        loop {
+            if std::fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_file()) {
+                bail!("invalid lifecycle lock");
+            }
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .mode(0o600)
+                .open(&path)
+                .context("opening lifecycle lock")?;
+            let file = tokio::task::spawn_blocking(move || -> Result<File> {
+                file.lock()?;
+                Ok(file)
+            })
+            .await??;
+            use std::os::unix::fs::MetadataExt;
+            let held = file.metadata()?;
+            match std::fs::symlink_metadata(&path) {
+                Ok(current) if current.ino() == held.ino() && current.dev() == held.dev() => {
+                    return Ok(Self { path, _file: file });
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("checking lifecycle lock"),
+            }
+        }
+    }
+
+    fn retire(self) -> Result<()> {
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context("retiring lifecycle lock"),
+        }
+    }
+}
+
+/// Gateway addresses and tunnel ports already held by retained guests.
+fn reservations(state: &StateDirectory) -> Result<(Vec<std::net::Ipv4Addr>, Vec<u16>)> {
+    let mut addresses = Vec::new();
+    let mut ports = Vec::new();
+    for retained in state.retained_ids()? {
+        // A directory without metadata was never assigned an address or port.
+        if let Ok(record) = state.read::<Record>(&retained) {
+            addresses.push(record.attachment.gateway_ip);
+            ports.push(record.route.port);
+        }
+    }
+    Ok((addresses, ports))
+}
+
+/// Node resources claimed for one new guest under the node reservation lock.
+struct Reserved {
+    attachment: network::Attachment,
+    port: u16,
+    directory: PathBuf,
+}
+
+/// Claim capacity, a private address (with its link and namespace names) and a
+/// tunnel port, and persist the record before releasing the node lock, so a
+/// concurrent create always observes every earlier claim.
+async fn reserve_create(
+    node: &Node,
+    state: &StateDirectory,
+    id: &str,
+    nonce: &str,
+    check_capacity: impl FnOnce() -> Result<()>,
+    record: impl FnOnce(Reserved) -> Record,
+) -> Result<Record> {
+    let _reservation = LifecycleLock::acquire(state.root().join(".lock")).await?;
+    check_capacity()?;
+    let (reserved_addresses, reserved_ports) = reservations(state)?;
+    let attachment = network::plan_attachment(node, id, nonce, &reserved_addresses).await?;
+    let port = unreserved_port(&reserved_ports)?;
+    let directory = state.create(id)?;
+    let record = record(Reserved {
+        attachment,
+        port,
+        directory,
+    });
+    state.write(id, &record)?;
+    Ok(record)
+}
+
+fn unreserved_port(reserved: &[u16]) -> Result<u16> {
+    for _ in 0..64 {
+        let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+        if !reserved.contains(&port) {
+            return Ok(port);
+        }
+    }
+    bail!("no unreserved tunnel port available")
+}
+
+async fn execute_locked(
+    settings: &Settings,
+    state: &StateDirectory,
+    action: Action,
+    id: &str,
+    policy_path: Option<&Path>,
+    nonce: Option<&str>,
+) -> Result<Value> {
+    let node = Node::with_transport(&settings.vm, settings.node_transport)?;
     let exists = state.path(id)?.try_exists()?;
     if action == Action::Abort {
         if !exists {
@@ -90,15 +202,36 @@ pub async fn execute(
         if Some(record.creation_nonce.as_str()) != nonce {
             return Ok(json!({}));
         }
-        return destroy(&node, &state, settings, id, &record).await;
+        return destroy(&node, state, settings, id, &record).await;
     }
     if action == Action::Create {
         let nonce = nonce.context("create requires proof nonce")?;
         model::validate_nonce(nonce)?;
         let policy = VmPolicy::load(policy_path.context("create requires a policy file")?)?;
-        model::validate_supported_profile(&policy)?;
+        settings.resource_profile.validate(&policy)?;
         if exists {
             bail!("sandbox state already exists");
+        }
+        let capacity = match (settings.resource_profile, settings.max_sandboxes) {
+            (model::ResourceProfile::FoundryBuild, None) => {
+                bail!("Foundry requires an explicit operator node capacity")
+            }
+            (_, capacity) => capacity,
+        };
+        let check_capacity = || -> Result<()> {
+            if let Some(capacity) = capacity
+                && state.retained_count()? >= usize::from(capacity)
+            {
+                bail!("node already retains its capacity of {capacity} guest disks");
+            }
+            Ok(())
+        };
+        // Refuse early without node access; re-checked under the reservation lock.
+        check_capacity()?;
+        if settings.resource_profile == model::ResourceProfile::FoundryBuild
+            && settings.image.is_none()
+        {
+            bail!("Foundry requires an explicit immutable operator image");
         }
         // Validate the host transport before contacting or allocating the node.
         state.control_path(id)?;
@@ -113,40 +246,41 @@ pub async fn execute(
         ) {
             bail!("container absence could not be confirmed before creation");
         }
-        let attachment = network::plan_attachment(&node, id, nonce).await?;
-        let directory = state.create(id)?;
-        let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+        let node_boot = node_boot_id(&node).await?;
         let deadline = policy
             .resources
             .validate(&OperatorCeilings::default())?
             .deadline_from(now()?)?;
-        let mut record = Record {
-            creation_nonce: nonce.to_owned(),
-            image: model::selected_image(settings.image.as_deref())?,
-            route: Route {
-                sandbox_id: id.to_owned(),
-                host: "127.0.0.1".into(),
-                port,
-                username: "sandbox".into(),
-                private_key_path: directory.join("client_key"),
-                known_hosts_path: directory.join("known_hosts"),
-            },
-            policy,
-            deadline,
-            network: None,
-            attachment,
-            storage_id: String::new(),
-            hypervisor_pid: 0,
-            watchdog_pid: 0,
-            cgroup_path: String::new(),
-        };
-        state.write(id, &record)?;
-        let result = create(&node, &state, settings, id, &record).await;
+        let image = model::selected_image(settings.image.as_deref())?;
+        let mut record =
+            reserve_create(&node, state, id, nonce, check_capacity, |reserved| Record {
+                creation_nonce: nonce.to_owned(),
+                node_boot_id: Some(node_boot),
+                image,
+                route: Route {
+                    sandbox_id: id.to_owned(),
+                    host: "127.0.0.1".into(),
+                    port: reserved.port,
+                    username: "sandbox".into(),
+                    private_key_path: reserved.directory.join("client_key"),
+                    known_hosts_path: reserved.directory.join("known_hosts"),
+                },
+                policy,
+                deadline,
+                network: None,
+                attachment: reserved.attachment,
+                storage_id: String::new(),
+                hypervisor_pid: 0,
+                watchdog_pid: 0,
+                cgroup_path: String::new(),
+            })
+            .await?;
+        let result = create(&node, state, settings, id, &record).await;
         match result {
             Ok(created) => {
                 record = created;
                 state.write(id, &record)?;
-                return observe(&node, &state, settings, id, &record, nonce).await;
+                return observe(&node, state, settings, id, &record, nonce).await;
             }
             Err(error) => {
                 return Err(error.context("creation left nonce-bound state for safe abort"));
@@ -174,10 +308,10 @@ pub async fn execute(
         bail!("sandbox state identity mismatch");
     }
     if action == Action::Delete {
-        return destroy(&node, &state, settings, id, &record).await;
+        return destroy(&node, state, settings, id, &record).await;
     }
     if action == Action::Stop {
-        return stop(&node, &state, settings, id, &record).await;
+        return stop(&node, state, settings, id, &record).await;
     }
     if model::selected_image(settings.image.as_deref())? != record.image {
         bail!("operator image differs from retained sandbox intent");
@@ -185,9 +319,9 @@ pub async fn execute(
     let nonce = nonce.context("verification requires a proof nonce")?;
     model::validate_nonce(nonce)?;
     let policy = VmPolicy::load(policy_path.context("verification requires a policy file")?)?;
-    model::validate_supported_profile(&policy)?;
+    settings.resource_profile.validate(&policy)?;
     if record.deadline.expired_at(now()?) {
-        let _ = stop(&node, &state, settings, id, &record).await;
+        let _ = stop(&node, state, settings, id, &record).await;
         bail!("sandbox lease expired");
     }
     let record = match action {
@@ -203,7 +337,7 @@ pub async fn execute(
             state.control_path(id)?;
             let record = Record { policy, ..record };
             state.write(id, &record)?;
-            start(&node, &state, settings, id, &record).await?
+            start(&node, state, settings, id, &record).await?
         }
         Action::Update => {
             if policy.resources != record.policy.resources {
@@ -222,7 +356,7 @@ pub async fn execute(
         }
         _ => bail!("unsupported lifecycle transition"),
     };
-    observe(&node, &state, settings, id, &record, nonce).await
+    observe(&node, state, settings, id, &record, nonce).await
 }
 
 async fn create(
@@ -242,7 +376,12 @@ async fn create(
     state.write(id, &record)?;
     network::install(node, &settings.node_binary, id, &spec).await?;
     let proxy = format!("http://{}:{}", spec.gateway_ip, spec.broker_port);
-    let config = super::spec::guest_spec(id, &record.attachment.namespace_path(), &proxy);
+    let config = super::spec::guest_spec_for(
+        id,
+        &record.attachment.namespace_path(),
+        &proxy,
+        &record.policy.resources,
+    );
     let config_path = format!("{}/oci.json", network::job_directory(id));
     network::put_json(node, &config, &config_path).await?;
     node.node(&args(&[
@@ -297,25 +436,8 @@ async fn copy_guest_file(node: &Node, id: &str, source: &Path, destination: &str
     let device = storage_device(node, &native).await?;
     let root = format!("{}/trusted-root", network::job_directory(id));
     node.node(&args(&["mkdir", "-p", &root])).await?;
-    let stage = node
-        .command(
-            "limactl",
-            &args(&["shell", node.vm(), "mktemp", "/tmp/osk-key.XXXXXXXX"]),
-            Duration::from_secs(15),
-        )
-        .await?;
-    let stage = String::from_utf8(stage.stdout)?.trim().to_owned();
+    let stage = node.stage(source).await?;
     let copy = async {
-        node.command(
-            "limactl",
-            &[
-                OsString::from("cp"),
-                source.as_os_str().to_owned(),
-                OsString::from(format!("{}:{stage}", node.vm())),
-            ],
-            Duration::from_secs(30),
-        )
-        .await?;
         node.node(&args(&["mount", &device, &root])).await?;
         let mode = if destination == "/etc/ssh/authorized_keys" {
             "0644"
@@ -334,7 +456,7 @@ async fn copy_guest_file(node: &Node, id: &str, source: &Path, destination: &str
     }
     .await;
     let unmount = node.node(&args(&["umount", &root])).await;
-    let _ = node.raw_node(&args(&["rm", "--", &stage])).await;
+    let _ = node.unstage(&stage).await;
     copy?;
     unmount?;
     Ok(())
@@ -355,6 +477,8 @@ async fn start(
         let fields = line.split_whitespace().collect::<Vec<_>>();
         fields.first().copied() == Some(id) && fields.last().copied() == Some("RUNNING")
     });
+    let restored = recover_boot_network(node, state, settings, id, record).await?;
+    let record = &restored;
     let spec = record
         .network
         .as_ref()
@@ -373,7 +497,7 @@ async fn start(
             "up",
         ]))
         .await?;
-        prepare_cgroup(node, id).await?;
+        prepare_cgroup(node, id, &record.policy).await?;
         prepared.cgroup_path = format!("/sys/fs/cgroup/openshell-kata/{id}");
         verify_storage(node, &native, &prepared.policy).await?;
         prepared.watchdog_pid = launch_watchdog(node, settings, id, &prepared).await?;
@@ -392,11 +516,11 @@ async fn start(
         write_control(
             node,
             &format!("/sys/fs/cgroup/openshell-kata/{id}/guest/memory.max"),
-            &model::LOCAL_HOST_MEMORY_BYTES.to_string(),
+            &model::host_memory_bytes(&record.policy.resources).to_string(),
         )
         .await?;
     }
-    let (pid, cgroup) = host_process(node, id, &native).await?;
+    let (pid, cgroup) = host_process(node, id, &native, &record.policy).await?;
     let record = Record {
         hypervisor_pid: pid,
         cgroup_path: cgroup,
@@ -429,7 +553,7 @@ async fn inspect(node: &Node, id: &str) -> Result<Value> {
     serde_json::from_slice(&output.stdout).context("decoding container observation")
 }
 
-async fn prepare_cgroup(node: &Node, id: &str) -> Result<()> {
+async fn prepare_cgroup(node: &Node, id: &str, policy: &VmPolicy) -> Result<()> {
     let parent = "/sys/fs/cgroup/openshell-kata";
     node.node(&args(&["mkdir", "-p", parent])).await?;
     write_control(
@@ -446,11 +570,16 @@ async fn prepare_cgroup(node: &Node, id: &str) -> Result<()> {
     .await?;
     let path = format!("{parent}/{id}");
     node.node(&args(&["mkdir", "-p", &path])).await?;
-    write_control(node, &format!("{path}/cpu.max"), "100000 100000").await?;
+    write_control(
+        node,
+        &format!("{path}/cpu.max"),
+        &format!("{} 100000", u64::from(policy.resources.vcpus) * 100000),
+    )
+    .await?;
     write_control(
         node,
         &format!("{path}/memory.max"),
-        &model::LOCAL_HOST_MEMORY_BYTES.to_string(),
+        &model::host_memory_bytes(&policy.resources).to_string(),
     )
     .await?;
     write_control(node, &format!("{path}/memory.swap.max"), "0").await?;
@@ -567,7 +696,7 @@ async fn observe(
     if native["SnapshotKey"] != record.storage_id {
         bail!("private snapshot identity changed");
     }
-    let (pid, _) = host_process(node, id, &native).await?;
+    let (pid, _) = host_process(node, id, &native, &record.policy).await?;
     verify_storage(node, &native, &record.policy).await?;
     let fence = network::verify(node, &settings.node_binary, id, &record.policy, nonce).await?;
     let output = node
@@ -628,15 +757,19 @@ async fn stop(
             "guest flush unavailable; proceeding with bounded forced stop"
         ),
     }
-    node.node(&args(&[
-        "ip",
-        "link",
-        "set",
-        &record.attachment.host_veth,
-        "down",
-    ]))
-    .await?;
+    if !network::attachment_absent(node, &record.attachment).await? {
+        node.node(&args(&[
+            "ip",
+            "link",
+            "set",
+            &record.attachment.host_veth,
+            "down",
+        ]))
+        .await?;
+    }
     stop_task(node, settings, id, record).await?;
+    // Recreate stopped attachments before accepting new allocations after reboot.
+    recover_boot_network(node, state, settings, id, record).await?;
     network::stop_unit(node, &unit(id)).await?;
     transport::close_tunnel(node, state, id).await?;
     Ok(json!({}))
@@ -719,3 +852,9 @@ async fn stop_task(node: &Node, settings: &Settings, id: &str, record: &Record) 
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod lock_tests;
+#[cfg(test)]
+#[path = "lifecycle/reboot_tests.rs"]
+mod reboot_tests;

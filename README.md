@@ -33,6 +33,9 @@ Landlock, process-identity, binary-identity, L7, and credential requirements.
 The local resource profile is one vCPU, 2048 MiB guest RAM and 2048 MiB writable disk.
 The host reserves another 256 MiB for the Kata runtime, so both enclosing host
 cgroups are capped at 2304 MiB while the guest remains limited to 2048 MiB.
+The native `foundry-build` profile (32 vCPU, 131072 MiB RAM, 262144 MiB disk)
+reserves the larger of 256 MiB and 1/64 of guest RAM, so its host caps are
+133120 MiB.
 Unsupported capacities fail before launch. The VM lifetime is configurable and
 continues across stop/start. See [the enforcement contract](docs/ENFORCEMENT_CONTRACT.md)
 for the exact semantics and qualification matrix.

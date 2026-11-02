@@ -87,6 +87,36 @@ impl StateDirectory {
         Ok(self.root.join(id))
     }
 
+    /// Count retained guest directories under the held private root capability.
+    ///
+    /// # Errors
+    /// Rejects unexpected entries, links and directories with unsafe ownership or modes.
+    pub fn retained_count(&self) -> Result<usize> {
+        Ok(self.retained_ids()?.len())
+    }
+
+    /// List retained guest identifiers under the held private root capability.
+    ///
+    /// # Errors
+    /// Rejects unexpected entries, links and directories with unsafe ownership or modes.
+    pub fn retained_ids(&self) -> Result<Vec<String>> {
+        self.check_root()?;
+        let mut ids = Vec::new();
+        for entry in self.directory.entries()? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_str().context("non-UTF8 runtime state entry")?;
+            // Lifecycle locks, control sockets and a concurrent process's transient
+            // ownership probe (`.tmp*`) are never retained guests.
+            if name == ".t" || name.starts_with(".lock") || name.starts_with(".tmp") {
+                continue;
+            }
+            self.open_state(name)?;
+            ids.push(name.to_owned());
+        }
+        Ok(ids)
+    }
+
     /// Exclusively create one private sandbox directory.
     ///
     /// # Errors

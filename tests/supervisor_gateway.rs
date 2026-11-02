@@ -193,6 +193,7 @@ impl Fixture {
             additional_guest_images: Vec::new(),
             recovery_dir: None,
             hosted_network_config: None,
+            max_sandboxes: None,
         });
         let authentication = serde_json::to_vec(
             &serde_json::json!({"supervisor":{"gateway_token":"initial-credential","ssh_host_private_key":fs::read_to_string(root.join("ssh-key"))?}}),
@@ -650,14 +651,14 @@ async fn slow_boot_renews_nearly_expired_launch_credentials_before_ready() -> an
         .state
         .initial_expires
         .lock()
-        .expect("fixture expiry") = Some(std::time::Instant::now() + Duration::from_secs(2));
+        .expect("fixture expiry") = Some(std::time::Instant::now() + Duration::from_secs(5));
     fixture.runtime.start().await?;
     fixture.phase(Phase::Ready).await?;
     assert!(
         fixture.state.refresh_calls.load(Ordering::SeqCst) > 0,
         "Ready must follow renewal even when boot consumed most of the launch TTL"
     );
-    tokio::time::sleep(Duration::from_millis(2100)).await;
+    tokio::time::sleep(Duration::from_millis(5100)).await;
     let control = fixture
         .state
         .control

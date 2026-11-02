@@ -216,6 +216,19 @@ pub struct Runtime {
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     endpoint: Mutex<Option<tempfile::TempDir>>,
 }
+/// Bound on one revalidation round, so heartbeats keep flowing under host load.
+const REVALIDATION_DEADLINE: Duration = Duration::from_secs(20);
+/// Cadence of full native runtime proofs while the effective policy is unchanged.
+pub const NATIVE_REVALIDATION_INTERVAL: Duration = Duration::from_secs(30);
+/// Longest a running guest may go without a successful proof before missed
+/// deadlines stop it like a violation.
+pub const REVALIDATION_GRACE: Duration = Duration::from_secs(300);
+
+/// Missed deadlines are deferred within the grace; verified failures never are.
+pub fn revalidation_deferrable(error: &anyhow::Error, since_verified: Duration) -> bool {
+    crate::guest::is_deadline(error) && since_verified < REVALIDATION_GRACE
+}
+
 impl Runtime {
     pub fn new(
         spec: c::DriverSandbox,
@@ -403,7 +416,18 @@ impl Runtime {
         };
         let mut applied = self.vm_policy.clone();
         self.check_providers(&mut client, &snapshot).await?;
-        self.enforce_snapshot(&snapshot, &mut applied).await?;
+        let mut attempt = 0;
+        // A boot burst can delay the first proof; a missed deadline is retried, a
+        // verified mismatch is not.
+        loop {
+            match self.enforce_snapshot(&snapshot, &mut applied).await {
+                Err(error) if crate::guest::is_deadline(&error) && attempt < 2 => {
+                    attempt += 1;
+                    tracing::warn!(sandbox=%self.id, error=%error, attempt, "initial runtime verification deferred");
+                }
+                result => break result?,
+            }
+        }
         if self.config.runtime_profile == RuntimeProfile::Kubernetes
             && self.hosted_network.is_none()
         {
@@ -453,6 +477,7 @@ impl Runtime {
         }
         let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
         let mut refresh = credentials::refresh_timer();
+        let mut verified_at = tokio::time::Instant::now();
         loop {
             tokio::select! {
                 () = self.cancel.cancelled() => return Ok(()),
@@ -461,12 +486,19 @@ impl Runtime {
                     if self.vm_policy.is_some() || self.config.runtime_profile == RuntimeProfile::Kubernetes {
                         tokio::select! {
                             () = self.cancel.cancelled() => return Ok(()),
-                            result = tokio::time::timeout(Duration::from_secs(20), async {
+                            result = tokio::time::timeout(REVALIDATION_DEADLINE, async {
                                 let mut request = self.request(s::GetSandboxConfigRequest { name:self.spec.name.clone(), ..Default::default() })?;
                                 request.set_timeout(Duration::from_secs(10));
                                 let effective = client.get_sandbox_config(request).await?.into_inner();
                                 self.check_providers(&mut client,&effective).await?;
-                                self.enforce_snapshot(&effective,&mut applied).await?;
+                                // Policy changes apply at once; unchanged native guests are
+                                // re-proven on a slower cadence to bound host load at fleet scale.
+                                let proven = self.operator_policy.is_none()
+                                    || effective != last_snapshot
+                                    || verified_at.elapsed() >= NATIVE_REVALIDATION_INTERVAL;
+                                if proven {
+                                    self.enforce_snapshot(&effective,&mut applied).await?;
+                                }
                                 if self.config.runtime_profile == RuntimeProfile::Kubernetes && self.hosted_network.is_none() {
                                         if effective.version!=last_snapshot.version || effective.config_revision!=last_snapshot.config_revision { bail!("effective policy changed; hosted runtime must be reprovisioned"); }
                                         let _validated = crate::policy::validate_policy(effective.policy.as_ref().context("effective hosted policy required")?)?;
@@ -476,8 +508,18 @@ impl Runtime {
                                     self.report_accepted(&mut client,&effective).await?;
                                     last_snapshot = effective;
                                 }
-                                Ok::<_,anyhow::Error>(())
-                            }) => { result.context("runtime revalidation deadline exceeded")??; }
+                                Ok::<_,anyhow::Error>(proven)
+                            }) => {
+                                match result.context("runtime revalidation deadline exceeded").and_then(|outcome| outcome) {
+                                    Ok(true) => verified_at = tokio::time::Instant::now(),
+                                    Ok(false) => {}
+                                    // Contention is not a violation: defer within a bounded grace.
+                                    Err(error) if revalidation_deferrable(&error, verified_at.elapsed()) => {
+                                        tracing::warn!(sandbox=%self.id, error=%error, "runtime revalidation deferred");
+                                    }
+                                    Err(error) => return Err(error),
+                                }
+                            }
                         }
                     }
                     bounded_send(&sender,o::SupervisorMessage {payload:Some(o::supervisor_message::Payload::Heartbeat(o::SupervisorHeartbeat {}))},&self.cancel).await?;

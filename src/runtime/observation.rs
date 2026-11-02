@@ -1,6 +1,6 @@
 //! Host observations of hypervisor identity, resource limits, and capped storage.
 use super::command::Node;
-use super::model::{LOCAL_GUEST_MEMORY_BYTES, LOCAL_HOST_MEMORY_BYTES};
+use super::model::{guest_memory_bytes, host_memory_bytes};
 use crate::profile::VmPolicy;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -8,7 +8,12 @@ use std::ffi::OsString;
 fn args(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
-pub(super) async fn host_process(node: &Node, id: &str, native: &Value) -> Result<(u32, String)> {
+pub(super) async fn host_process(
+    node: &Node,
+    id: &str,
+    native: &Value,
+    policy: &VmPolicy,
+) -> Result<(u32, String)> {
     let internal = native["ID"].as_str().context("missing container ID")?;
     let output = node
         .node(&args(&["pgrep", "-f", "containerd-shim-kata-v2"]))
@@ -55,12 +60,14 @@ pub(super) async fn host_process(node: &Node, id: &str, native: &Value) -> Resul
                 .node(&args(&["cat", &format!("{cgroup}/cpu.max")]))
                 .await?;
             if !valid_memory_limits(
+                &policy.resources,
                 native
                     .pointer("/Spec/linux/resources/memory/limit")
                     .and_then(Value::as_u64),
                 String::from_utf8(memory.stdout)?.trim(),
                 String::from_utf8(guest_memory.stdout)?.trim(),
-            ) || String::from_utf8(cpu.stdout)?.trim() != "100000 100000"
+            ) || String::from_utf8(cpu.stdout)?.trim()
+                != format!("{} 100000", u64::from(policy.resources.vcpus) * 100000)
             {
                 bail!("host resource limits differ from admitted profile");
             }
@@ -77,7 +84,7 @@ pub(super) async fn host_process(node: &Node, id: &str, native: &Value) -> Resul
                 .lines()
                 .filter(|name| name.starts_with("db_vcpu"))
                 .count()
-                != 1
+                != policy.resources.vcpus as usize
             {
                 bail!("unexpected virtual CPU count");
             }
@@ -87,10 +94,16 @@ pub(super) async fn host_process(node: &Node, id: &str, native: &Value) -> Resul
     bail!("running official Rust Kata hypervisor was not found")
 }
 
-fn valid_memory_limits(guest_bytes: Option<u64>, parent: &str, shim: &str) -> bool {
-    guest_bytes == Some(LOCAL_GUEST_MEMORY_BYTES)
-        && parent.parse::<u64>().ok() == Some(LOCAL_HOST_MEMORY_BYTES)
-        && shim.parse::<u64>().ok() == Some(LOCAL_HOST_MEMORY_BYTES)
+fn valid_memory_limits(
+    resources: &crate::boundary::process::VmLimits,
+    guest_bytes: Option<u64>,
+    parent: &str,
+    shim: &str,
+) -> bool {
+    let host = host_memory_bytes(resources);
+    guest_bytes == Some(guest_memory_bytes(resources))
+        && parent.parse::<u64>().ok() == Some(host)
+        && shim.parse::<u64>().ok() == Some(host)
 }
 
 pub(super) async fn verify_storage(node: &Node, native: &Value, policy: &VmPolicy) -> Result<()> {
@@ -177,11 +190,27 @@ pub(super) async fn storage_device(node: &Node, native: &Value) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::valid_memory_limits;
+    use crate::boundary::process::VmLimits;
+
+    fn limits(vcpus: u32, memory_mib: u64, disk_mib: u64) -> VmLimits {
+        VmLimits {
+            vcpus,
+            memory_mib,
+            disk_mib,
+            lifetime_secs: 3600,
+        }
+    }
 
     #[test]
     fn guest_memory_and_both_host_limits_are_verified_separately() {
+        let local = limits(1, 2048, 2048);
         let guest = Some(2_147_483_648);
-        assert!(valid_memory_limits(guest, "2415919104", "2415919104"));
+        assert!(valid_memory_limits(
+            &local,
+            guest,
+            "2415919104",
+            "2415919104"
+        ));
         for (parent, shim) in [
             ("2147483648", "2415919104"),
             ("2415919104", "2147483648"),
@@ -189,13 +218,41 @@ mod tests {
             ("2415919104", "max"),
             ("2415919105", "2415919104"),
         ] {
-            assert!(!valid_memory_limits(guest, parent, shim));
+            assert!(!valid_memory_limits(&local, guest, parent, shim));
         }
         assert!(!valid_memory_limits(
+            &local,
             Some(2_415_919_104),
             "2415919104",
             "2415919104"
         ));
-        assert!(!valid_memory_limits(None, "2415919104", "2415919104"));
+        assert!(!valid_memory_limits(
+            &local,
+            None,
+            "2415919104",
+            "2415919104"
+        ));
+    }
+
+    #[test]
+    fn large_build_guests_reserve_proportional_host_overhead() {
+        // foundry-build: 128 GiB guest RAM plus a 2 GiB (1/64) host margin.
+        let build = limits(32, 131_072, 262_144);
+        let guest = Some(137_438_953_472);
+        let host = (137_438_953_472_u64 + 2_147_483_648).to_string();
+        assert!(valid_memory_limits(&build, guest, &host, &host));
+        let local_margin = (137_438_953_472_u64 + 268_435_456).to_string();
+        assert!(!valid_memory_limits(
+            &build,
+            guest,
+            &local_margin,
+            &local_margin
+        ));
+        assert!(!valid_memory_limits(
+            &build,
+            Some(2_147_483_648),
+            &host,
+            &host
+        ));
     }
 }

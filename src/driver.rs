@@ -114,11 +114,11 @@ impl Driver {
             .as_deref()
             .map(crate::profile::VmPolicy::load)
             .transpose()?;
-        let recovery = if config.runtime_profile == crate::config::RuntimeProfile::Kubernetes {
-            config.recovery_dir.clone().map(Store::new)
-        } else {
-            None
-        };
+        let recovery = config
+            .recovery_dir
+            .as_ref()
+            .map(|_| Store::for_config(&config))
+            .transpose()?;
         Ok(Self {
             config,
             registry: Arc::default(),
@@ -173,7 +173,7 @@ impl Driver {
         let Some(store) = &self.recovery else {
             return Ok(());
         };
-        let records = store.load(&self.config)?;
+        let recovered = store.load(&self.config)?;
         {
             let registry = self.registry.read().await;
             anyhow::ensure!(
@@ -181,17 +181,47 @@ impl Driver {
                 "recovery requires a fresh adapter"
             );
         }
-        for retained in &records {
+        let mut retired = Vec::new();
+        for record in &recovered.retired {
+            let id = SandboxId::parse(&record.retained.sandbox.id)?;
+            if self.retire(store, &id, &record.reason).await {
+                retired.push(id.to_string());
+            }
+        }
+        for retained in &recovered.admitted {
             let id = SandboxId::parse(&retained.sandbox.id)?;
             guest::lifecycle(&self.config, "stop", &id).await?;
         }
         let mut registry = self.registry.write().await;
-        for retained in records {
+        for retained in recovered.admitted {
             registry
                 .retained
                 .insert(retained.sandbox.id.clone(), retained);
         }
+        // Reported as deleted so the lifecycle owner re-places them.
+        registry.deleted.extend(retired);
         Ok(())
+    }
+    /// Delete one retained sandbox the operator profile no longer admits: guest,
+    /// network fence, snapshot and recovery record. A failed cleanup keeps the
+    /// record for the next recovery and never blocks the rest of the adapter.
+    async fn retire(&self, store: &Store, id: &SandboxId, reason: &str) -> bool {
+        tracing::warn!(sandbox=%id, reason, "retiring retained sandbox the operator profile no longer admits");
+        let cleanup = async {
+            guest::lifecycle(&self.config, "delete", id).await?;
+            store.remove(id.as_str())
+        }
+        .await;
+        match cleanup {
+            Ok(()) => {
+                tracing::info!(sandbox=%id, "retired sandbox deleted");
+                true
+            }
+            Err(error) => {
+                tracing::error!(sandbox=%id, error=%format!("{error:#}"), "retired sandbox cleanup failed; record kept for the next recovery");
+                false
+            }
+        }
     }
     fn persist(&self, retained: &Retained) -> Result<(), Status> {
         if let Some(store) = &self.recovery {
