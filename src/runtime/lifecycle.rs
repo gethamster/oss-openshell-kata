@@ -386,6 +386,15 @@ async fn start(
             .await?;
         node.node(&args(&["ctr", "tasks", "start", "--detach", id]))
             .await?;
+        // Kata uses the OCI memory limit to size guest RAM, then applies that
+        // same limit to the host shim cgroup. Keep guest sizing unchanged and
+        // allow the shim's bounded overhead under the enclosing host budget.
+        write_control(
+            node,
+            &format!("/sys/fs/cgroup/openshell-kata/{id}/guest/memory.max"),
+            &model::LOCAL_HOST_MEMORY_BYTES.to_string(),
+        )
+        .await?;
     }
     let (pid, cgroup) = host_process(node, id, &native).await?;
     let record = Record {
@@ -438,7 +447,12 @@ async fn prepare_cgroup(node: &Node, id: &str) -> Result<()> {
     let path = format!("{parent}/{id}");
     node.node(&args(&["mkdir", "-p", &path])).await?;
     write_control(node, &format!("{path}/cpu.max"), "100000 100000").await?;
-    write_control(node, &format!("{path}/memory.max"), "2147483648").await?;
+    write_control(
+        node,
+        &format!("{path}/memory.max"),
+        &model::LOCAL_HOST_MEMORY_BYTES.to_string(),
+    )
+    .await?;
     write_control(node, &format!("{path}/memory.swap.max"), "0").await?;
     write_control(
         node,

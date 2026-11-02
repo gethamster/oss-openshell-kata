@@ -24,6 +24,10 @@ fn minimal_guest_spec_exposes_no_host_files_or_devices() {
         assert!(!mount["source"].as_str().expect("source").starts_with('/'));
     }
     assert_eq!(spec["linux"]["cgroupsPath"], "/openshell-kata/sample/guest");
+    assert_eq!(
+        spec["linux"]["resources"]["memory"]["limit"],
+        2_147_483_648_u64
+    );
     assert!(
         spec["linux"]["namespaces"]
             .as_array()

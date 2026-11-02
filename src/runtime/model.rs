@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{net::Ipv4Addr, path::PathBuf, str::FromStr};
 
+pub(super) const LOCAL_GUEST_MEMORY_BYTES: u64 = 2048 * 1024 * 1024;
+// Dragonball maps guest RAM into the shim; reserve a bounded host-only margin
+// for the runtime, page tables and device state without enlarging guest RAM.
+pub(super) const LOCAL_HOST_MEMORY_BYTES: u64 = LOCAL_GUEST_MEMORY_BYTES + 256 * 1024 * 1024;
+
 /// Existing lifecycle verbs plus explicit policy verification and replacement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
