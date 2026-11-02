@@ -381,6 +381,7 @@ async fn native_recovery_stops_before_inventory_and_requires_new_authenticated_s
         runtime_profile: RuntimeProfile::Local,
         vm_policy: Some(path),
         guest_network_cidr: None,
+        additional_guest_images: Vec::new(),
         recovery_dir: Some(root.join("native-registry")),
         ..(*fixture.runtime.config).clone()
     });

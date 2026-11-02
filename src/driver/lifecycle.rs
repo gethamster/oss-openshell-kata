@@ -15,6 +15,8 @@ impl Driver {
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         let id =
             SandboxId::parse(&sandbox.id).map_err(|e| Status::invalid_argument(e.to_string()))?;
+        // Lifecycle and proof steps run with this sandbox's admitted guest image.
+        let config = std::sync::Arc::new(self.config.for_sandbox(&sandbox));
         let _recovery = self.recovery_gate.read().await;
         let _guard = self.lifecycle.lock(id.as_str()).await?;
         if let Some(existing) = self.registry.read().await.active.get(id.as_str()) {
@@ -70,7 +72,7 @@ impl Driver {
         ))?;
         let nonce = uuid::Uuid::new_v4().to_string();
         let guest_result = guest::lifecycle_for_policy(
-            &self.config,
+            &config,
             "create",
             &id,
             Some(&sandbox.workspace),
@@ -91,7 +93,7 @@ impl Driver {
         };
         let runtime = match Runtime::new_with_policy(
             sandbox.clone(),
-            self.config.clone(),
+            config.clone(),
             guest,
             authentication,
             self.operator_policy.clone(),
@@ -103,9 +105,7 @@ impl Driver {
                 return Err(internal(error));
             }
         };
-        if let Err(error) =
-            guest::verify_runtime(&self.config, &runtime.spec, &runtime.instance).await
-        {
+        if let Err(error) = guest::verify_runtime(&config, &runtime.spec, &runtime.instance).await {
             self.compensate_create(sandbox, &id, &nonce).await;
             return Err(internal(error));
         }
@@ -168,6 +168,7 @@ impl Driver {
                 "retained runtime identity differs",
             ));
         }
+        let config = std::sync::Arc::new(self.config.for_sandbox(&retained.sandbox));
         let policy = self
             .policy_for(&retained.sandbox)
             .map_err(internal)?
@@ -190,7 +191,7 @@ impl Driver {
                 .await
                 .map_err(internal)?;
             let guest = guest::lifecycle_for_policy(
-                &self.config,
+                &config,
                 "start",
                 &id,
                 Some(&retained.sandbox.workspace),
@@ -202,14 +203,14 @@ impl Driver {
             .ok_or_else(|| Status::internal("missing guest route"))?;
             let runtime = Runtime::new_with_policy(
                 retained.sandbox,
-                self.config.clone(),
+                config.clone(),
                 guest,
                 request.launch_authentication,
                 self.operator_policy.clone(),
                 policy,
             )
             .map_err(internal)?;
-            guest::verify_runtime(&self.config, &runtime.spec, &runtime.instance)
+            guest::verify_runtime(&config, &runtime.spec, &runtime.instance)
                 .await
                 .map_err(internal)?;
             self.register(id.to_string(), runtime.clone(), request.generation_id)

@@ -23,6 +23,7 @@ fn config(root: &Path) -> Config {
         runtime_profile: RuntimeProfile::Kubernetes,
         guest_image: Some(IMAGE.into()),
         guest_network_cidr: Some("10.176.0.0/16".into()),
+        additional_guest_images: Vec::new(),
         recovery_dir: Some(root.join("registry")),
     }
 }
@@ -269,6 +270,7 @@ fn native_config(root: &Path) -> anyhow::Result<Config> {
         runtime_profile: RuntimeProfile::Local,
         vm_policy: Some(policy),
         guest_network_cidr: None,
+        additional_guest_images: Vec::new(),
         ..config(root)
     })
 }

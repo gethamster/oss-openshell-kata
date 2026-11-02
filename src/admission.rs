@@ -14,6 +14,16 @@ pub fn compile_request_for_image(
     operator: &crate::profile::VmPolicy,
     image: Option<&str>,
 ) -> Result<crate::profile::VmPolicy> {
+    compile_request_for_images(sandbox, operator, image.as_slice())
+}
+
+/// Admit a request whose template selects one of the operator-pinned images; every
+/// image runs under the same operator VM profile.
+pub fn compile_request_for_images(
+    sandbox: &DriverSandbox,
+    operator: &crate::profile::VmPolicy,
+    images: &[&str],
+) -> Result<crate::profile::VmPolicy> {
     let native = sandbox
         .spec
         .as_ref()
@@ -28,10 +38,12 @@ pub fn compile_request_for_image(
         .template
         .as_mut()
         .ok_or_else(|| anyhow::anyhow!("sandbox template required"))?;
-    if let Some(image) = image {
-        crate::hosted::validate_image(image)?;
+    if !images.is_empty() {
+        for image in images {
+            crate::hosted::validate_image(image)?;
+        }
         anyhow::ensure!(
-            template.image == image,
+            images.contains(&template.image.as_str()),
             "guest image differs from operator profile"
         );
         template.image = "docker:29-dind".into();
