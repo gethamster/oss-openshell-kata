@@ -267,6 +267,46 @@ fn shim_socket_uses_pinned_kata_address_hash_and_rejects_paths() {
 }
 
 #[test]
+fn build_profile_is_explicit_and_preserves_resource_bounds() {
+    use openshell_kata::runtime::model::ResourceProfile;
+    use openshell_kata::runtime::spec::guest_spec_for;
+    let mut p = policy();
+    p.resources.vcpus = 16;
+    p.resources.memory_mib = 49152;
+    p.resources.disk_mib = 32768;
+    assert!(ResourceProfile::Local.validate(&p).is_err());
+    assert!(ResourceProfile::FoundryBuild.validate(&p).is_err());
+    ResourceProfile::Build.validate(&p).expect("build profile");
+    let spec = guest_spec_for(
+        "sample",
+        "/run/netns/sample",
+        "http://10.205.0.1:38080",
+        &p.resources,
+    );
+    assert_eq!(
+        spec["linux"]["resources"]["memory"]["limit"],
+        51_539_607_552_u64
+    );
+    assert_eq!(spec["linux"]["resources"]["cpu"]["quota"], 1_600_000);
+    assert_eq!(
+        spec["annotations"]["io.katacontainers.config.hypervisor.default_vcpus"],
+        "16"
+    );
+    for field in ["vcpus", "memory_mib", "disk_mib"] {
+        let mut invalid = p.clone();
+        match field {
+            "vcpus" => invalid.resources.vcpus += 1,
+            "memory_mib" => invalid.resources.memory_mib += 1,
+            _ => invalid.resources.disk_mib += 1,
+        }
+        assert!(
+            ResourceProfile::Build.validate(&invalid).is_err(),
+            "{field}"
+        );
+    }
+}
+
+#[test]
 fn foundry_profile_is_explicit_and_drives_exact_guest_resources() {
     use openshell_kata::runtime::model::ResourceProfile;
     use openshell_kata::runtime::spec::guest_spec_for;
@@ -295,6 +335,41 @@ fn foundry_profile_is_explicit_and_drives_exact_guest_resources() {
     );
     p.resources.disk_mib += 1;
     assert!(ResourceProfile::FoundryBuild.validate(&p).is_err());
+}
+
+#[tokio::test]
+async fn build_profile_requires_and_enforces_node_capacity_before_node_access() {
+    let (temp, state, mut settings) = setup();
+    settings.resource_profile = openshell_kata::runtime::model::ResourceProfile::Build;
+    let path = temp.path().join("build-policy.json");
+    std::fs::write(&path, include_bytes!("../examples/build-vm.json")).expect("build policy");
+    let error = lifecycle::execute(
+        &settings,
+        Action::Create,
+        "build",
+        Some(&path),
+        Some("creation-nonce-0123456789"),
+    )
+    .await
+    .expect_err("explicit capacity required");
+    assert!(
+        error
+            .to_string()
+            .contains("explicit operator node capacity"),
+        "{error:#}"
+    );
+    settings.max_sandboxes = Some(1);
+    state.create("retained").expect("retained sandbox");
+    let error = lifecycle::execute(
+        &settings,
+        Action::Create,
+        "build",
+        Some(&path),
+        Some("creation-nonce-0123456789"),
+    )
+    .await
+    .expect_err("retained capacity enforced");
+    assert!(error.to_string().contains("capacity of 1"), "{error:#}");
 }
 
 fn foundry_policy(temp: &tempfile::TempDir) -> PathBuf {

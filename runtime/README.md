@@ -10,13 +10,27 @@ no forwarded SSH agent. Tenant workloads always use the official Kata 4.3.1
 Rust shim with Dragonball and `virtio-blk-mmio`. Trusted image assembly alone
 uses runc. The source Docker image and Kata release archive are pinned by hash.
 
+Set `OPENSHELL_KATA_RESOURCE_PROFILE=build` and select a distinct
+`OPENSHELL_KATA_VM` to provision the build node. Its host has 16 CPUs, 56 GiB RAM
+and a 96 GiB sparse disk. Its `--resource-profile build` guests have 16 vCPUs,
+48 GiB RAM and 32 GiB private disk, backed by a 64 GiB thin pool. Profile changes
+require a separate node; the setup script rejects an existing pool of a different size.
+The build node enables shared-memory transparent huge pages and opts the VMM
+into them. This keeps normal memory-cgroup accounting while avoiding unaligned
+4 KiB RAM mappings and their nested-translation overhead. It also disables
+OverlayFS redirect and metacopy defaults in the guest so Docker can use native diffs.
+
 ## Enforcement
 
-Each guest has one vCPU, a 2048 MiB memory ceiling, a private 2048 MiB devmapper
+The default local guest has one vCPU, a 2048 MiB memory ceiling, a private 2048 MiB devmapper
 block root and a persistent expiration deadline. Host cgroups constrain the
 Rust VMM process and its threads. A separate systemd watchdog pins the cgroup
 kill handle before readiness; it survives adapter exit and enforces expiration.
 Restart does not renew the deadline.
+
+The large build profiles allow up to five minutes for guest boot, including
+the kernel's memory initialization. Ordinary node operations retain their
+90-second deadline. The independent VM lifetime watchdog remains active during boot.
 
 Shared filesystems are disabled. The minimal OCI specification contains no
 host bind mounts or host device entries. The guest agent image is read-only at

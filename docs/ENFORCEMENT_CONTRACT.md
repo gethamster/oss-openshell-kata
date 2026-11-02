@@ -83,9 +83,17 @@ The version-1 schema uses integer quantities and a single explicit profile:
 ```
 
 All resource limits must be positive, fit checked unit conversions, and stay
-within the runtime's supported allocation range. The local runtime supports
-exactly one vCPU, 2048 MiB RAM, and a 2048 MiB devmapper block-backed guest image;
-other allocations are rejected. Lifetime is configurable within the validated
+within the runtime's supported allocation range. The operator selects an exact
+resource profile with the lifecycle helper's `--resource-profile` argument:
+
+| Profile | vCPUs | Guest RAM (MiB) | Private disk (MiB) | Provisioning |
+| --- | ---: | ---: | ---: | --- |
+| `local` | 1 | 2048 | 2048 | Lima or native Linux |
+| `build` | 16 | 49152 | 32768 | Lima |
+| `foundry-build` | 32 | 131072 | 262144 | Native Linux |
+
+The node's Kata configuration and devmapper snapshot size must match the selected
+profile; mismatches fail before readiness. Lifetime is configurable within the validated
 operator limit. The generic resource validator has broader ceilings, which do
 not establish local runtime support. Caller resource overrides are currently
 rejected. `disk_mib` describes the private guest disk, not just a Docker tmpfs.

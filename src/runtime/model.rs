@@ -150,6 +150,8 @@ pub enum ResourceProfile {
     /// Development profile with one CPU and 2 GiB RAM/disk.
     #[default]
     Local,
+    /// Local builder with 16 CPUs, 48 GiB RAM and 32 GiB private disk.
+    Build,
     /// Foundry builder with 32 CPUs, 128 GiB RAM and 256 GiB private disk.
     FoundryBuild,
 }
@@ -159,6 +161,7 @@ impl ResourceProfile {
         policy.validate()?;
         let expected = match self {
             Self::Local => (1, 2048, 2048),
+            Self::Build => (16, 49152, 32768),
             Self::FoundryBuild => (32, 131072, 262144),
         };
         if (

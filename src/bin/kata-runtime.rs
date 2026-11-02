@@ -32,7 +32,7 @@ struct Arguments {
     /// Operator-selected immutable guest image; never a workload override.
     #[arg(long)]
     image: Option<String>,
-    /// Operator node capacity in retained guests; required by `foundry-build`.
+    /// Operator node capacity in retained guests; required by build profiles.
     #[arg(
         long,
         env = "OPENSHELL_KATA_MAX_SANDBOXES",
