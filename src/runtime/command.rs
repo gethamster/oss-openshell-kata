@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
-const NODE_COMMAND_TIMEOUT: Duration = Duration::from_secs(100);
+const NODE_COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_DIAGNOSTIC_CHARACTERS: usize = 4096;
 const MAX_COMMAND_OUTPUT_BYTES: u64 = 1024 * 1024;
 
@@ -167,7 +167,15 @@ impl Node {
     /// # Errors
     /// Reports transport, timeout, or command exit failures.
     pub async fn node(&self, args: &[OsString]) -> Result<Output> {
-        let output = self.raw_node(args).await?;
+        self.node_with_timeout(args, NODE_COMMAND_TIMEOUT).await
+    }
+
+    /// Execute a checked node command with an explicit bounded operation deadline.
+    ///
+    /// # Errors
+    /// Rejects zero or overflowing timeouts and reports transport or command failures.
+    pub async fn node_with_timeout(&self, args: &[OsString], timeout: Duration) -> Result<Output> {
+        let output = self.raw_node_with_timeout(args, timeout).await?;
         if !output.status.success() {
             bail!(
                 "runtime node command failed with {}: {}",
@@ -183,16 +191,30 @@ impl Node {
     /// # Errors
     /// Reports transport launch failures and the outer command deadline.
     pub async fn raw_node(&self, args: &[OsString]) -> Result<Output> {
+        self.raw_node_with_timeout(args, NODE_COMMAND_TIMEOUT).await
+    }
+
+    async fn raw_node_with_timeout(&self, args: &[OsString], timeout: Duration) -> Result<Output> {
+        if timeout.as_secs() == 0 {
+            bail!("node operation timeout must be at least one second");
+        }
+        let transport_timeout = timeout
+            .checked_add(Duration::from_secs(10))
+            .context("node operation timeout overflows")?;
         #[cfg(test)]
         if let Some(runner) = &self.test_runner {
-            return self.raw_command(runner, args, NODE_COMMAND_TIMEOUT).await;
+            return self.raw_command(runner, args, transport_timeout).await;
         }
-        let (program, arguments) = self.node_invocation(args);
-        self.raw_command(program, &arguments, NODE_COMMAND_TIMEOUT)
+        let (program, arguments) = self.node_invocation(args, timeout);
+        self.raw_command(program, &arguments, transport_timeout)
             .await
     }
 
-    fn node_invocation(&self, args: &[OsString]) -> (&'static str, Vec<OsString>) {
+    fn node_invocation(
+        &self,
+        args: &[OsString],
+        timeout: Duration,
+    ) -> (&'static str, Vec<OsString>) {
         let (program, mut arguments): (_, Vec<OsString>) = match self.transport {
             NodeTransport::Lima => (
                 "limactl",
@@ -204,7 +226,7 @@ impl Node {
                     "--".into(),
                     "timeout".into(),
                     "--signal=KILL".into(),
-                    "90".into(),
+                    timeout.as_secs().to_string().into(),
                 ],
             ),
             NodeTransport::LinuxLocal => (
@@ -214,7 +236,7 @@ impl Node {
                     "--".into(),
                     "timeout".into(),
                     "--signal=KILL".into(),
-                    "90".into(),
+                    timeout.as_secs().to_string().into(),
                 ],
             ),
         };
@@ -316,7 +338,10 @@ mod tests {
     #[test]
     fn linux_local_transport_has_noninteractive_privilege_and_bounded_timeout() {
         let node = Node::with_transport("native", NodeTransport::LinuxLocal).expect("native node");
-        let (program, args) = node.node_invocation(&["printf".into(), "a b; $x".into()]);
+        let (program, args) = node.node_invocation(
+            &["printf".into(), "a b; $x".into()],
+            Duration::from_secs(90),
+        );
         assert_eq!(program, "sudo");
         assert_eq!(
             args,
@@ -330,6 +355,29 @@ mod tests {
                 "a b; $x".into()
             ]
         );
+    }
+
+    #[test]
+    fn long_node_operation_keeps_its_explicit_remote_deadline() {
+        let node = Node::with_transport("test-node", NodeTransport::Lima).expect("node");
+        let (_, args) = node.node_invocation(
+            &["ctr".into(), "tasks".into(), "start".into()],
+            Duration::from_secs(300),
+        );
+        assert_eq!(args[7], "300");
+        assert_eq!(args[8], "ctr");
+        assert_eq!(args[9], "tasks");
+        assert_eq!(args[10], "start");
+    }
+
+    #[tokio::test]
+    async fn zero_node_timeout_is_rejected_before_execution() {
+        let node = Node::new("test-node").expect("node");
+        let error = node
+            .node_with_timeout(&["true".into()], Duration::ZERO)
+            .await
+            .expect_err("zero timeout");
+        assert!(error.to_string().contains("at least one second"));
     }
 
     #[test]

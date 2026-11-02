@@ -511,8 +511,18 @@ async fn start(
         let _ = node
             .raw_node(&args(&["ctr", "tasks", "delete", "--force", id]))
             .await?;
-        node.node(&args(&["ctr", "tasks", "start", "--detach", id]))
-            .await?;
+        // Large guests initialize their page metadata before the agent can answer.
+        // Bound that boot separately from short node operations; the independent
+        // VM lifetime watchdog remains active throughout startup.
+        let boot_timeout = match settings.resource_profile {
+            model::ResourceProfile::Local => Duration::from_secs(90),
+            _ => Duration::from_secs(300),
+        };
+        node.node_with_timeout(
+            &args(&["ctr", "tasks", "start", "--detach", id]),
+            boot_timeout,
+        )
+        .await?;
         // Kata uses the OCI memory limit to size guest RAM, then applies that
         // same limit to the host shim cgroup. Keep guest sizing unchanged and
         // allow the shim's bounded overhead under the enclosing host budget.

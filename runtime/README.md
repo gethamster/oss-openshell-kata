@@ -18,11 +18,15 @@ require a separate node; the setup script rejects an existing pool of a differen
 
 ## Enforcement
 
-Each guest has one vCPU, a 2048 MiB memory ceiling, a private 2048 MiB devmapper
+The default local guest has one vCPU, a 2048 MiB memory ceiling, a private 2048 MiB devmapper
 block root and a persistent expiration deadline. Host cgroups constrain the
 Rust VMM process and its threads. A separate systemd watchdog pins the cgroup
 kill handle before readiness; it survives adapter exit and enforces expiration.
 Restart does not renew the deadline.
+
+The large build profiles allow up to five minutes for guest boot, including
+the kernel's memory initialization. Ordinary node operations retain their
+90-second deadline. The independent VM lifetime watchdog remains active during boot.
 
 Shared filesystems are disabled. The minimal OCI specification contains no
 host bind mounts or host device entries. The guest agent image is read-only at
