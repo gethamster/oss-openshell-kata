@@ -114,6 +114,13 @@ pub fn run_runtime_guard() -> Result<()> {
     }
     let config = GuardConfig::load()?;
     match arguments.first().map(String::as_str) {
+        Some("probe") => {
+            ensure!(arguments.len() == 1, "probe accepts no arguments");
+            #[cfg(target_os = "linux")]
+            return super::hosted_fence_probe::probe(&config);
+            #[cfg(not(target_os = "linux"))]
+            bail!("the TCX probe requires Linux");
+        }
         Some("verify") => verify_command(&config, &arguments[1..]),
         Some("internal-install") => internal(&config, &arguments[1..], Mode::Install),
         Some("internal-verify") => internal(&config, &arguments[1..], Mode::Verify),
@@ -499,4 +506,41 @@ fn file_sha256(path: &Path) -> Result<String> {
         hash.update(&buffer[..length]);
     }
     Ok(format!("{:x}", hash.finalize()))
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(super) fn validate_probe_namespace(
+    current: (u64, u64),
+    host: (u64, u64),
+    links: &serde_json::Value,
+) -> Result<()> {
+    ensure!(
+        current != host,
+        "TCX probe must run in a fresh non-host network namespace"
+    );
+    let links = links
+        .as_array()
+        .context("invalid probe interface inventory")?;
+    ensure!(
+        links.len() == 1 && links[0]["ifname"] == "lo",
+        "TCX probe requires a fresh network namespace containing only loopback"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn probe_rejects_host_and_existing_workload_namespaces() {
+        assert!(validate_probe_namespace((1, 2), (1, 2), &json!([{"ifname":"lo"}])).is_err());
+        assert!(
+            validate_probe_namespace((1, 3), (1, 2), &json!([{"ifname":"lo"},{"ifname":"eth0"}]))
+                .is_err()
+        );
+        assert!(validate_probe_namespace((1, 3), (1, 2), &json!([])).is_err());
+        assert!(validate_probe_namespace((1, 3), (1, 2), &json!([{"ifname":"lo"}])).is_ok());
+    }
 }

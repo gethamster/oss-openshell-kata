@@ -3,6 +3,9 @@
 #[cfg(target_os = "linux")]
 #[path = "hosted_fence_linux.rs"]
 mod hosted_fence_linux;
+#[cfg(target_os = "linux")]
+#[path = "hosted_fence_probe.rs"]
+mod hosted_fence_probe;
 #[path = "hosted_fence_runtime.rs"]
 mod hosted_fence_runtime;
 #[path = "hosted_fence_packet.rs"]

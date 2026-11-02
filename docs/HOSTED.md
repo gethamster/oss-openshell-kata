@@ -275,3 +275,13 @@ Qualify this mode on the target cluster with provider attach, a successful
 request, credential refresh, detach/revoke, forbidden hosts, metadata/private
 addresses, cross-VM isolation and restart recovery. Unit and broker control tests
 do not establish that a cluster has installed the required guarded runtime.
+
+
+Before publishing the guarded-runtime Ready label on a fresh or rebooted node,
+run `unshare --net /usr/local/bin/kata-runtime-guard probe` with the prepared
+root-owned runtime guard configuration. The probe rejects the host network
+namespace and any namespace with an existing non-loopback interface. It loads
+the pinned TCX object, attaches and reads back both classifiers on a temporary
+dummy interface, then drops both links and deletes that interface before
+reporting success. It creates no BPF pins and touches no live guest interface.
+A kernel version string alone is not a capability proof.
