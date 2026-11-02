@@ -213,6 +213,9 @@ async fn execute_locked(
             bail!("sandbox state already exists");
         }
         let capacity = match (settings.resource_profile, settings.max_sandboxes) {
+            (model::ResourceProfile::Build, None) => {
+                bail!("build profile requires an explicit operator node capacity")
+            }
             (model::ResourceProfile::FoundryBuild, None) => {
                 bail!("Foundry requires an explicit operator node capacity")
             }

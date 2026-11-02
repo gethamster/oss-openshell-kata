@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "profile": "docker-vm",
+  "resources": {
+    "vcpus": 16,
+    "memory_mib": 49152,
+    "disk_mib": 32768,
+    "lifetime_secs": 14400
+  },
+  "filesystem": {
+    "host_mounts": "deny",
+    "transfer_max_bytes": 268435456,
+    "transfer_max_entries": 4096
+  },
+  "network": {
+    "tcp_allow": [
+      {
+        "host": "auth.docker.io",
+        "port": 443
+      },
+      {
+        "host": "registry-1.docker.io",
+        "port": 443
+      },
+      {
+        "host": "production.cloudflare.docker.com",
+        "port": 443
+      },
+      {
+        "host": "production.cloudfront.docker.com",
+        "port": 443
+      }
+    ]
+  }
+}

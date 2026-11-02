@@ -33,6 +33,9 @@ Landlock, process-identity, binary-identity, L7, and credential requirements.
 The local resource profile is one vCPU, 2048 MiB guest RAM and 2048 MiB writable disk.
 The host reserves another 256 MiB for the Kata runtime, so both enclosing host
 cgroups are capped at 2304 MiB while the guest remains limited to 2048 MiB.
+The `build` profile grants 16 vCPUs, 48 GiB guest RAM and 32 GiB private disk;
+its host memory cap is 48.75 GiB. Select it with `--resource-profile build`
+and [the matching operator policy](examples/build-vm.json).
 The native `foundry-build` profile (32 vCPU, 131072 MiB RAM, 262144 MiB disk)
 reserves the larger of 256 MiB and 1/64 of guest RAM, so its host caps are
 133120 MiB.
@@ -70,6 +73,13 @@ target/debug/kata-dev setup-gateway
 target/debug/kata-dev services start --vm-policy "$(pwd)/examples/docker-vm.json"
 target/debug/kata-dev e2e --policy "$(pwd)/scripts/e2e-native-policy.yaml"
 ```
+
+For a dedicated local build node, provision with
+`OPENSHELL_KATA_VM=openshell-kata-build OPENSHELL_KATA_RESOURCE_PROFILE=build runtime/setup-local.sh`.
+Its Lima host has 16 CPUs, 56 GiB RAM and a 96 GiB sparse disk. The larger host
+memory allocation covers the guest, VMM overhead and node services. Keep it
+separate from an existing development node and pass `--vm openshell-kata-build
+--resource-profile build --max-sandboxes 1` to the lifecycle helper.
 
 The example operator profile permits the exact public Docker Hub destinations
 used by the qualification fixture. Review any additional registry redirect or

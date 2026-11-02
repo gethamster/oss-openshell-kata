@@ -10,6 +10,12 @@ no forwarded SSH agent. Tenant workloads always use the official Kata 4.3.1
 Rust shim with Dragonball and `virtio-blk-mmio`. Trusted image assembly alone
 uses runc. The source Docker image and Kata release archive are pinned by hash.
 
+Set `OPENSHELL_KATA_RESOURCE_PROFILE=build` and select a distinct
+`OPENSHELL_KATA_VM` to provision the build node. Its host has 16 CPUs, 56 GiB RAM
+and a 96 GiB sparse disk. Its `--resource-profile build` guests have 16 vCPUs,
+48 GiB RAM and 32 GiB private disk, backed by a 64 GiB thin pool. Profile changes
+require a separate node; the setup script rejects an existing pool of a different size.
+
 ## Enforcement
 
 Each guest has one vCPU, a 2048 MiB memory ceiling, a private 2048 MiB devmapper
