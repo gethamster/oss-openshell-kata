@@ -1,6 +1,5 @@
 use super::{client::Client, lifecycle, manifest, model::State, policy, reaper};
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
 
 struct Fixture {
     _temporary: tempfile::TempDir,
@@ -58,9 +57,7 @@ esac
 "#,
             root.display()
         );
-        std::fs::write(&program, script).expect("mock kubectl");
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
-            .expect("executable");
+        super::test_program::write(&program, &script);
         std::fs::write(
             root.join("pod.json"),
             serde_json::to_vec(&pod).expect("pod"),

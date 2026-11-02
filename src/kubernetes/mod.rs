@@ -21,6 +21,8 @@ mod proof;
 mod reaper;
 mod store;
 #[cfg(test)]
+mod test_program;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod workspace_tests;
