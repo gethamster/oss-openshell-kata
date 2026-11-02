@@ -167,6 +167,9 @@ impl Fixture {
                 ..Default::default()
             };
         let shutdown = CancellationToken::new();
+        // The embedded proxy links both supported TLS backends; choose the same
+        // provider as the adapter before the standalone fixture creates TLS.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let future = Server::builder()
             .tls_config(ServerTlsConfig::new().identity(Identity::from_pem(
                 fs::read(root.join("server.crt"))?,
@@ -193,6 +196,7 @@ impl Fixture {
             additional_guest_images: Vec::new(),
             recovery_dir: None,
             hosted_network_config: None,
+            hosted_resource_profile: Default::default(),
             max_sandboxes: None,
         });
         let authentication = serde_json::to_vec(

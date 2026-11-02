@@ -48,11 +48,11 @@ async fn exchange(control: &Path, request: &HostedControlRequest) -> Result<Host
     let mut reader = BufReader::new(stream);
     let mut bytes = Vec::new();
     (&mut reader)
-        .take(65537)
+        .take(262145)
         .read_until(b'\n', &mut bytes)
         .await?;
     ensure!(
-        bytes.len() <= 65536,
+        bytes.len() <= 262144,
         "hosted control response exceeds limit"
     );
     let response: HostedControlResponse =
@@ -68,7 +68,9 @@ async fn exchange(control: &Path, request: &HostedControlRequest) -> Result<Host
         );
         let expected = if matches!(
             request,
-            HostedControlRequest::Authorize { .. } | HostedControlRequest::Stop { .. }
+            HostedControlRequest::Authorize { .. }
+                | HostedControlRequest::AuthorizeProviders { .. }
+                | HostedControlRequest::Stop { .. }
         ) {
             generation
                 .checked_add(1)
@@ -101,6 +103,7 @@ pub(crate) async fn from_path(control: &Path, path: &Path, action: &str) -> Resu
     let matches = matches!(
         (&request, action),
         (HostedControlRequest::Authorize { .. }, "authorize")
+            | (HostedControlRequest::AuthorizeProviders { .. }, "authorize")
             | (HostedControlRequest::Inspect { .. }, "inspect")
             | (HostedControlRequest::Stop { .. }, "stop")
     );
@@ -128,7 +131,10 @@ pub(super) async fn connection<S: tokio::io::AsyncRead + tokio::io::AsyncWrite +
         .await?;
     ensure!(bytes.len() <= LIMIT, "oversized hosted control request");
     let request: HostedControlRequest = serde_json::from_slice(&bytes)?;
-    let authorize = matches!(request, HostedControlRequest::Authorize { .. });
+    let authorize = matches!(
+        request,
+        HostedControlRequest::Authorize { .. } | HostedControlRequest::AuthorizeProviders { .. }
+    );
     let response = tokio::select! {
         biased;
         gone=reader.read_u8()=>{let _=gone;bail!("hosted control caller disconnected or sent extra data");}
@@ -138,7 +144,10 @@ pub(super) async fn connection<S: tokio::io::AsyncRead + tokio::io::AsyncWrite +
     // through the final acknowledgement write as well.
     let mut rollback = authorize.then(|| broker.mutation_guard());
     let mut bytes = serde_json::to_vec(&response)?;
-    ensure!(bytes.len() < 65536, "hosted control response exceeds bound");
+    ensure!(
+        bytes.len() < 262144,
+        "hosted control response exceeds bound"
+    );
     bytes.push(b'\n');
     writer.write_all(&bytes).await?;
     writer.shutdown().await?;

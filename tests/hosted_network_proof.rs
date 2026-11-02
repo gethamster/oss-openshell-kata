@@ -63,6 +63,9 @@ fn fixture() -> anyhow::Result<(tempfile::TempDir, c::DriverSandbox, NetworkPoli
     };
     let config = HostedBrokerConfig {
         version: 1,
+        provider_mediation: false,
+        gateway_endpoint: String::new(),
+        gateway_ca_pem: String::new(),
         operator_ceiling: policy.clone(),
         initial_ceiling: policy.clone(),
         binding: binding.clone(),

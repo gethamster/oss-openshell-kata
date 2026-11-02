@@ -15,6 +15,9 @@ fn policy() -> NetworkPolicy {
 fn config() -> HostedBrokerConfig {
     HostedBrokerConfig {
         version: 1,
+        provider_mediation: false,
+        gateway_endpoint: String::new(),
+        gateway_ca_pem: String::new(),
         operator_ceiling: policy(),
         initial_ceiling: policy(),
         binding: BrokerBinding {
@@ -541,5 +544,140 @@ async fn poisoned_guard_revokes_authority_without_panicking_control() -> Result<
     assert!(broker.guard.check(Some("8.8.4.4".parse()?)).is_err());
     broker.guard.revoke();
     assert_eq!(inspect(&broker).await?.authorization_expires_at_unix, 0);
+    broker.shutdown().await
+}
+
+#[tokio::test]
+async fn provider_snapshots_are_vm_bound_and_do_not_require_a_hostname_ceiling() -> Result<()> {
+    use crate::proto::openshell::{sandbox::v1 as s, v1 as o};
+    use prost::Message;
+    let address = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?;
+    let mut cfg = config();
+    cfg.provider_mediation = true;
+    cfg.operator_ceiling = NetworkPolicy::default();
+    cfg.initial_ceiling = NetworkPolicy::default();
+    cfg.gateway_endpoint = "https://gateway.example.test".into();
+    cfg.gateway_ca_pem = "fixture-CA-unused-with-static-credentials".into();
+    let broker = bind_hosted_broker(address, cfg, inventory(1)).await?;
+    assert!(broker.guard.check(None).is_err());
+    let mut effective = s::GetSandboxConfigResponse {
+        configuration_admitted: true,
+        policy: Some(s::SandboxPolicy {
+            version: 1,
+            network_policies: std::collections::HashMap::from([(
+                "provider".into(),
+                s::NetworkPolicyRule {
+                    binaries: vec![s::NetworkBinary { path: "/**".into() }],
+                    endpoints: vec![s::NetworkEndpoint {
+                        host: "openrouter.ai".into(),
+                        port: 443,
+                        protocol: "rest".into(),
+                        enforcement: 1,
+                        access: 2,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        }),
+        config_revision: 1,
+        provider_env_revision: 1,
+        provider_attachment_epoch: "first".into(),
+        policy_hash: "hash".into(),
+        ..Default::default()
+    };
+    let canonical = openshell_core::proto::SandboxPolicy::decode(
+        effective
+            .policy
+            .as_ref()
+            .expect("policy")
+            .encode_to_vec()
+            .as_slice(),
+    )?;
+    effective.policy_hash = openshell_core::policy_identity::deterministic_policy_hash(&canonical);
+    let environment = o::GetSandboxProviderEnvironmentResponse {
+        environment: std::collections::HashMap::from([(
+            "TOKEN".into(),
+            "test-upstream-secret".into(),
+        )]),
+        static_credential_bindings: std::collections::HashMap::from([(
+            "TOKEN".into(),
+            o::StaticCredentialBinding {
+                endpoints: vec![o::StaticCredentialEndpointBinding {
+                    host: "openrouter.ai".into(),
+                    port: 443,
+                    path: "/**".into(),
+                }],
+                credential_identity: "fixture:TOKEN".into(),
+                workload_credential_handle: "a".repeat(64),
+            },
+        )]),
+        stable_placeholder_environment_keys: vec!["TOKEN".into()],
+        provider_env_revision: 1,
+        provider_attachment_epoch: "first".into(),
+        policy_hash: effective.policy_hash.clone(),
+        supports_stable_placeholder_environment_keys: true,
+        ..Default::default()
+    };
+    let request = HostedControlRequest::AuthorizeProviders {
+        binding: broker.config.binding.clone(),
+        startup_epoch: broker.startup_epoch.clone(),
+        expected_generation: 1,
+        nonce: uuid::Uuid::new_v4().to_string(),
+        inventory: inventory(1),
+        providers: super::super::ProviderAuthorization {
+            config: effective.encode_to_vec(),
+            environment: environment.encode_to_vec(),
+            gateway_token: "fixture-gateway-token".into(),
+        },
+    };
+    let mut foreign = request.clone();
+    if let HostedControlRequest::AuthorizeProviders { binding, .. } = &mut foreign {
+        binding.sandbox_id = "other-vm".into();
+    }
+    assert!(broker.request(foreign).await.is_err());
+    let response = broker.request(request.clone()).await?;
+    assert_eq!(response.generation, 2);
+    assert_eq!(
+        response
+            .provider_material
+            .as_ref()
+            .expect("material")
+            .mediation_generation,
+        2
+    );
+    let serialized = serde_json::to_string(&response)?;
+    assert!(!serialized.contains("fixture-gateway-token"));
+    assert!(!serialized.contains("test-upstream-secret"));
+    assert_ne!(
+        response
+            .provider_material
+            .as_ref()
+            .expect("material")
+            .environment["TOKEN"],
+        "test-upstream-secret"
+    );
+    assert!(broker.guard.check(Some("1.1.1.1".parse()?)).is_ok());
+    assert!(
+        broker
+            .guard
+            .check(Some("169.254.169.254".parse()?))
+            .is_err()
+    );
+    assert!(DestinationGuard::check_host(broker.guard.as_ref(), "internal.example.com").is_err());
+    assert!(
+        broker.request(request).await.is_err(),
+        "stale generation must not be replayed"
+    );
+    broker.guard.revoke();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(
+        broker
+            .snapshot(&uuid::Uuid::new_v4().to_string())
+            .await?
+            .provider_material
+            .is_none()
+    );
     broker.shutdown().await
 }

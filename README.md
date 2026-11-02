@@ -51,8 +51,9 @@ file-transfer API and is not subject to archive quotas.
 
 The [Kubernetes profile](docs/HOSTED.md) uses the same adapter and the Rust
 `kata-kubernetes` launcher, with explicit operator-owned image, private network
-range and recovery settings. Its current network capability is deny-all guest
-egress; the local TCP broker is a separate capability. `kata-operator` handles
+range and recovery settings. It defaults to deny-all guest
+egress; explicit hosted TCP and provider-mediated profiles require the guarded
+node runtime and fresh infrastructure inventory described in the hosted guide. `kata-operator` handles
 trusted startup preparation and socket readiness without Python. Both guest
 recipes include `kata-workspace` for System command/file operations and protocol
 compatibility checks.

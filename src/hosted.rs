@@ -117,6 +117,92 @@ pub fn validate_brokered_request(
     crate::network::compile_native(native, ceiling)
 }
 
+/// Admit VM-scoped provider rules without a separate operator hostname ceiling.
+pub fn validate_provider_request(
+    sandbox: &DriverSandbox,
+    image: &str,
+) -> Result<crate::network::NetworkPolicy> {
+    validate_resources(sandbox, image)?;
+    let native = sandbox
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.policy.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("explicit VM policy required"))?;
+    validate_provider_policy(native)?;
+    Ok(crate::network::NetworkPolicy::default())
+}
+
+/// Validate only guarantees the host mediator can enforce for an untrusted VM.
+pub(crate) fn validate_provider_policy(
+    native: &crate::proto::openshell::sandbox::v1::SandboxPolicy,
+) -> Result<()> {
+    let without_network = crate::proto::openshell::sandbox::v1::SandboxPolicy {
+        network_policies: Default::default(),
+        ..native.clone()
+    };
+    let _intent = crate::policy::validate_policy(&without_network)?;
+    for rule in native.network_policies.values() {
+        ensure!(
+            rule.binaries.len() == 1
+                && rule.binaries[0].path == "/**"
+                && !rule.endpoints.is_empty(),
+            "provider mediation requires explicit VM-wide rules"
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_network_request(
+    sandbox: &DriverSandbox,
+    image: &str,
+    operator: &crate::kubernetes::HostedNetworkConfig,
+) -> Result<crate::network::NetworkPolicy> {
+    if operator.provider_mediation {
+        validate_provider_request(sandbox, image)
+    } else {
+        validate_brokered_request(sandbox, image, &operator.operator_ceiling)
+    }
+}
+
+pub(crate) fn requested_limits(sandbox: &DriverSandbox) -> (&'static str, &'static str) {
+    let owner = sandbox
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.template.as_ref())
+        .and_then(|template| template.resources.as_ref())
+        .is_some_and(|resources| resources.cpu_limit == "4" || resources.memory_limit == "8Gi");
+    if owner { ("4", "8Gi") } else { ("2", "4Gi") }
+}
+
+pub(crate) fn validate_resource_shape(
+    sandbox: &DriverSandbox,
+    cpu: &str,
+    memory: &str,
+) -> Result<()> {
+    let resources = sandbox
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.template.as_ref())
+        .and_then(|template| template.resources.as_ref());
+    let default = cpu == "2" && memory == "4Gi";
+    ensure!(
+        resources.is_some() || default,
+        "explicit owner resource shape required"
+    );
+    if let Some(resources) = resources {
+        ensure!(
+            (resources.cpu_request == cpu || default && resources.cpu_request.is_empty())
+                && (resources.cpu_limit == cpu || default && resources.cpu_limit.is_empty())
+                && (resources.memory_request == memory
+                    || default && resources.memory_request.is_empty())
+                && (resources.memory_limit == memory
+                    || default && resources.memory_limit.is_empty()),
+            "resource override differs from qualified limits"
+        );
+    }
+    Ok(())
+}
+
 fn validate_resources(sandbox: &DriverSandbox, image: &str) -> Result<()> {
     namespace(&sandbox.workspace)?;
     validate_image(image)?;
@@ -157,15 +243,8 @@ fn validate_resources(sandbox: &DriverSandbox, image: &str) -> Result<()> {
             .is_none_or(|value| value.gpu.is_none()),
         "GPU resources unsupported"
     );
-    if let Some(resources) = &template.resources {
-        ensure!(
-            (resources.cpu_request.is_empty() || resources.cpu_request == "2")
-                && (resources.cpu_limit.is_empty() || resources.cpu_limit == "2")
-                && (resources.memory_request.is_empty() || resources.memory_request == "4Gi")
-                && (resources.memory_limit.is_empty() || resources.memory_limit == "4Gi"),
-            "resource override differs from qualified limits"
-        );
-    }
+    let (cpu, memory) = requested_limits(sandbox);
+    validate_resource_shape(sandbox, cpu, memory)?;
     ensure!(
         template.user_namespaces.is_none(),
         "user namespace override unsupported"
@@ -199,8 +278,7 @@ impl RuntimeProof {
             !challenge.is_nil() && challenge.to_string() == nonce,
             "invalid runtime proof challenge"
         );
-        let initial_ceiling =
-            validate_brokered_request(sandbox, image, &operator.operator_ceiling)?;
+        let initial_ceiling = validate_network_request(sandbox, image, &operator)?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
@@ -239,6 +317,13 @@ impl RuntimeProof {
         );
         let expected_config = crate::network::HostedBrokerConfig {
             version: 1,
+            provider_mediation: operator.provider_mediation,
+            gateway_endpoint: operator.gateway_endpoint.clone(),
+            gateway_ca_pem: if operator.provider_mediation {
+                std::fs::read_to_string(&operator.gateway_ca_file)?
+            } else {
+                String::new()
+            },
             operator_ceiling: operator.operator_ceiling,
             initial_ceiling,
             binding: broker.binding.clone(),
@@ -333,8 +418,8 @@ impl RuntimeProof {
         ensure!(
             self.runtime_class == runtime_class
                 && self.image == image
-                && self.cpu == "2"
-                && self.memory == "4Gi"
+                && self.cpu == requested_limits(sandbox).0
+                && self.memory == requested_limits(sandbox).1
                 && self.policy_sha256.len() == 64
                 && self.policy_sha256.bytes().all(|b| b.is_ascii_hexdigit()),
             "runtime proof is missing qualified fences"
@@ -381,8 +466,8 @@ impl RuntimeProof {
             self.runtime_class == "kata-qemu-runtime-rs"
                 && self.image == image
                 && self.network == "deny-all-egress"
-                && self.cpu == "2"
-                && self.memory == "4Gi"
+                && self.cpu == requested_limits(sandbox).0
+                && self.memory == requested_limits(sandbox).1
                 && self.policy_sha256.len() == 64
                 && self.policy_sha256.bytes().all(|b| b.is_ascii_hexdigit()),
             "runtime proof is missing qualified fences"

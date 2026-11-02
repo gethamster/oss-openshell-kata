@@ -56,6 +56,13 @@ impl BrokerBinding {
 #[serde(deny_unknown_fields)]
 pub struct HostedBrokerConfig {
     pub version: u32,
+    /// Provider policy supplies destination authority; only address fences are operator-owned.
+    #[serde(default)]
+    pub provider_mediation: bool,
+    #[serde(default)]
+    pub gateway_endpoint: String,
+    #[serde(default)]
+    pub gateway_ca_pem: String,
     pub operator_ceiling: NetworkPolicy,
     pub initial_ceiling: NetworkPolicy,
     pub binding: BrokerBinding,
@@ -91,6 +98,12 @@ impl HostedBrokerConfig {
         ensure!(
             serde_json::to_vec(&self.operator_ceiling.normalized()?)?.len() <= 48 * 1024,
             "operator network ceiling exceeds proof size bound"
+        );
+        ensure!(
+            !self.provider_mediation
+                || (self.operator_ceiling.tcp_allow.is_empty()
+                    && self.initial_ceiling.tcp_allow.is_empty()),
+            "provider mediation cannot carry a separate hostname ceiling"
         );
         ensure!(
             self.initial_ceiling.is_subset_of(&self.operator_ceiling)?,
@@ -198,12 +211,53 @@ impl InfrastructureInventory {
     }
 }
 
+/// Matching authenticated gateway snapshots and a scoped, externally renewed JWT.
+/// This message travels only over the private broker control channel and is never persisted.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderAuthorization {
+    pub config: Vec<u8>,
+    pub environment: Vec<u8>,
+    pub gateway_token: String,
+}
+
+/// Non-secret guest material returned only after the broker installs a snapshot.
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderMaterial {
+    pub environment: std::collections::HashMap<String, String>,
+    pub files: std::collections::HashMap<String, String>,
+    pub ca_certificate: String,
+    pub mediation_generation: u64,
+    pub config_revision: u64,
+    pub provider_revision: u64,
+    pub policy_hash: String,
+    pub provider_attachment_epoch: String,
+}
+impl std::fmt::Debug for ProviderMaterial {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderMaterial")
+            .field("config_revision", &self.config_revision)
+            .field("provider_revision", &self.provider_revision)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A read or mutation against an exact broker launch, process and CAS revision.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostedControlRequest {
     Ready {
         nonce: String,
+    },
+    AuthorizeProviders {
+        binding: BrokerBinding,
+        startup_epoch: String,
+        expected_generation: u64,
+        nonce: String,
+        providers: ProviderAuthorization,
+        inventory: InfrastructureInventory,
     },
     Authorize {
         binding: BrokerBinding,
@@ -231,6 +285,7 @@ impl HostedControlRequest {
         match self {
             Self::Ready { nonce }
             | Self::Authorize { nonce, .. }
+            | Self::AuthorizeProviders { nonce, .. }
             | Self::Inspect { nonce, .. }
             | Self::Stop { nonce, .. } => nonce,
         }
@@ -238,7 +293,13 @@ impl HostedControlRequest {
     pub(super) fn expected(&self) -> Option<(&BrokerBinding, &str, u64)> {
         match self {
             Self::Ready { .. } => None,
-            Self::Authorize {
+            Self::AuthorizeProviders {
+                binding,
+                startup_epoch,
+                expected_generation,
+                ..
+            }
+            | Self::Authorize {
                 binding,
                 startup_epoch,
                 expected_generation,
@@ -277,6 +338,8 @@ pub struct HostedControlResponse {
     pub authorization_expires_at_unix: u64,
     pub active_connections: usize,
     pub stopping: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_material: Option<ProviderMaterial>,
 }
 
 pub(super) fn canonical_uuid(value: &str) -> Result<()> {

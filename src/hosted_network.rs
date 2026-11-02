@@ -11,14 +11,21 @@ use std::path::Path;
 
 pub(crate) struct RuntimeNetwork {
     initial: NetworkPolicy,
+    provider_mediation: bool,
 }
 
 impl RuntimeNetwork {
     pub(crate) fn new(path: &Path, sandbox: &DriverSandbox, image: &str) -> Result<Self> {
         let operator = HostedNetworkConfig::load(path)?;
-        let initial =
-            hosted::validate_brokered_request(sandbox, image, &operator.operator_ceiling)?;
-        Ok(Self { initial })
+        let initial = hosted::validate_network_request(sandbox, image, &operator)?;
+        Ok(Self {
+            initial,
+            provider_mediation: operator.provider_mediation,
+        })
+    }
+
+    pub(crate) fn provider_mediation(&self) -> bool {
+        self.provider_mediation
     }
 
     pub(crate) fn compile(&self, snapshot: &s::GetSandboxConfigResponse) -> Result<NetworkPolicy> {
@@ -28,6 +35,15 @@ impl RuntimeNetwork {
                 && snapshot.policy_source == s::PolicySource::Sandbox as i32,
             "brokered networking requires an admitted sandbox policy without middleware"
         );
+        if self.provider_mediation {
+            hosted::validate_provider_policy(
+                snapshot
+                    .policy
+                    .as_ref()
+                    .context("effective native policy missing")?,
+            )?;
+            return Ok(NetworkPolicy::default());
+        }
         compile_native(
             snapshot
                 .policy
@@ -75,6 +91,7 @@ mod tests {
     #[test]
     fn fresh_snapshots_may_revoke_but_cannot_expand_original_capability() -> Result<()> {
         let network = RuntimeNetwork {
+            provider_mediation: false,
             initial: NetworkPolicy {
                 tcp_allow: vec![Endpoint {
                     host: "registry.npmjs.org".into(),
@@ -89,6 +106,7 @@ mod tests {
         assert_eq!(network.compile(&snapshot(None))?, NetworkPolicy::default());
         assert!(network.compile(&snapshot(Some("github.com"))).is_err());
         let denied = RuntimeNetwork {
+            provider_mediation: false,
             initial: NetworkPolicy::default(),
         };
         assert!(
@@ -103,6 +121,7 @@ mod tests {
     #[test]
     fn global_or_unadmitted_snapshots_never_authorize_a_lease() {
         let network = RuntimeNetwork {
+            provider_mediation: false,
             initial: NetworkPolicy::default(),
         };
         let mut effective = snapshot(None);
@@ -114,5 +133,35 @@ mod tests {
         effective = snapshot(None);
         effective.policy = None;
         assert!(network.compile(&effective).is_err());
+    }
+    #[test]
+    fn provider_mode_admits_new_attached_hosts_but_never_guest_process_claims() -> Result<()> {
+        let network = RuntimeNetwork {
+            initial: NetworkPolicy::default(),
+            provider_mediation: true,
+        };
+        let mut effective = snapshot(Some("openrouter.ai"));
+        network.compile(&effective)?;
+        effective
+            .policy
+            .as_mut()
+            .expect("policy")
+            .network_policies
+            .get_mut("tcp")
+            .expect("rule")
+            .endpoints[0]
+            .host = "tuara.com".into();
+        network.compile(&effective)?;
+        effective
+            .policy
+            .as_mut()
+            .expect("policy")
+            .network_policies
+            .get_mut("tcp")
+            .expect("rule")
+            .binaries[0]
+            .path = "/usr/bin/curl".into();
+        assert!(network.compile(&effective).is_err());
+        Ok(())
     }
 }

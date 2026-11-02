@@ -21,6 +21,7 @@ fn local_prototype_mode_cannot_be_redirected_by_url_userinfo() {
         additional_guest_images: Vec::new(),
         recovery_dir: None,
         hosted_network_config: None,
+        hosted_resource_profile: Default::default(),
         max_sandboxes: None,
     };
     assert!(config.validate().is_ok());
@@ -112,6 +113,7 @@ fn hosted_operator_requires_an_explicit_private_guest_network() {
         additional_guest_images: Vec::new(),
         recovery_dir: Some("/private/registry".into()),
         hosted_network_config: None,
+        hosted_resource_profile: Default::default(),
         max_sandboxes: None,
     };
     assert!(config.validate().is_err(), "network cannot be implicit");
@@ -125,4 +127,83 @@ fn hosted_operator_requires_an_explicit_private_guest_network() {
         config.validate().is_err(),
         "all-network route is not a guest range"
     );
+}
+
+#[test]
+fn hosted_owner_images_and_resource_shape_require_operator_admission() -> anyhow::Result<()> {
+    use clap::Parser;
+    use openshell_kata::proto::openshell::{compute::v1 as c, sandbox::v1 as s};
+    let image = format!("registry.example/owner@sha256:{}", "b".repeat(64));
+    let default = format!("registry.example/guest@sha256:{}", "a".repeat(64));
+    let config = Config::try_parse_from([
+        "adapter",
+        "--socket",
+        "/private/adapter.sock",
+        "--gateway",
+        "https://gateway.example",
+        "--gateway-ca",
+        "/private/ca",
+        "--lifecycle",
+        "/usr/local/bin/kata-kubernetes",
+        "--runtime-profile",
+        "kubernetes",
+        "--guest-image",
+        &default,
+        "--additional-guest-image",
+        &image,
+        "--guest-network-cidr",
+        "10.176.0.0/16",
+        "--recovery-dir",
+        "/private/recovery",
+        "--hosted-resource-profile",
+        "owner-4cpu-8gib",
+    ])?;
+    config.validate()?;
+    let mut sandbox = c::DriverSandbox {
+        id: "owner".into(),
+        workspace: "tenant".into(),
+        spec: Some(c::DriverSandboxSpec {
+            policy: Some(s::SandboxPolicy {
+                version: 1,
+                ..Default::default()
+            }),
+            template: Some(c::DriverSandboxTemplate {
+                image: image.clone(),
+                resources: Some(c::DriverResourceRequirements {
+                    cpu_request: "4".into(),
+                    cpu_limit: "4".into(),
+                    memory_request: "8Gi".into(),
+                    memory_limit: "8Gi".into(),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    config.validate_request(&sandbox)?;
+    assert_eq!(
+        config.for_sandbox(&sandbox).guest_image.as_deref(),
+        Some(image.as_str())
+    );
+    let template = sandbox
+        .spec
+        .as_mut()
+        .expect("spec")
+        .template
+        .as_mut()
+        .expect("template");
+    template.image = format!("registry.example/untrusted@sha256:{}", "c".repeat(64));
+    assert!(config.validate_request(&sandbox).is_err());
+    let template = sandbox
+        .spec
+        .as_mut()
+        .expect("spec")
+        .template
+        .as_mut()
+        .expect("template");
+    template.image = image;
+    template.resources.as_mut().expect("resources").memory_limit = "16Gi".into();
+    assert!(config.validate_request(&sandbox).is_err());
+    Ok(())
 }

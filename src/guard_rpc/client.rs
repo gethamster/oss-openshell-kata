@@ -38,6 +38,7 @@ pub(super) async fn request(
     pod_uid: &str,
     nonce: &str,
 ) -> Result<HostedFenceResponse> {
+    crate::initialize_tls();
     canonical_uuid(pod_uid)?;
     canonical_uuid(nonce)?;
     config.validate()?;

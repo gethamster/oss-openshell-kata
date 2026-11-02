@@ -273,7 +273,7 @@ pub(super) fn validate(
     );
     let proof = json!({"version":1,"sandbox_id":state.sandbox_id,"workspace":state.workspace,
         "namespace":state.namespace,"runtime_identity":identity,"runtime_class":manifest::runtime(state),
-        "image":state.image,"network":"deny-all-egress","cpu":"2","memory":"4Gi",
+        "image":state.image,"network":"deny-all-egress","cpu":manifest::limits()["cpu"],"memory":manifest::limits()["memory"],
         "expires_at_unix":expires,"deadline_enforcement":"kubelet-active-deadline",
         "policy_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&observed.policies)?))});
     Ok((

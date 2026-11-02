@@ -68,6 +68,13 @@ struct Arguments {
 /// network policies, mismatched generations, and failed or timed-out operations.
 pub async fn run() -> Result<()> {
     let arguments = Arguments::parse();
+    ensure!(
+        matches!(
+            env::var("OPENSHELL_KATA_HOSTED_RESOURCE_PROFILE").as_deref(),
+            Err(env::VarError::NotPresent) | Ok("hosted-2cpu-4gib" | "owner-4cpu-8gib")
+        ),
+        "unsupported hosted resource profile"
+    );
     let client = client::Client {
         program: "kubectl".into(),
         context: env::var("OPENSHELL_KATA_KUBE_CONTEXT")
@@ -152,10 +159,26 @@ pub async fn run() -> Result<()> {
                 );
                 proof::verify_with_nonce(&client, &state, &storage_class()?, &network()?, &nonce)
                     .await?;
-                let path = env::var_os("OPENSHELL_KATA_NETWORK_POLICY_FILE")
-                    .context("network policy file required")?;
-                let policy = broker_config::read_json(std::path::Path::new(&path))?;
-                let next = broker::authorize(&client, &state, policy, &nonce).await?;
+                let operator = broker::config(state.broker.as_ref().context("broker missing")?)?;
+                let next = if operator.provider_mediation {
+                    use std::io::Read;
+                    let mut bytes = Vec::new();
+                    std::io::stdin()
+                        .take(1024 * 1024 + 1)
+                        .read_to_end(&mut bytes)?;
+                    ensure!(
+                        bytes.len() <= 1024 * 1024,
+                        "provider control input exceeds limit"
+                    );
+                    let providers =
+                        serde_json::from_slice(&bytes).context("invalid provider control input")?;
+                    broker::authorize_providers(&client, &state, providers, &nonce).await?
+                } else {
+                    let path = env::var_os("OPENSHELL_KATA_NETWORK_POLICY_FILE")
+                        .context("network policy file required")?;
+                    let policy = broker_config::read_json(std::path::Path::new(&path))?;
+                    broker::authorize(&client, &state, policy, &nonce).await?
+                };
                 store.save(&next)?;
                 proof::verify_with_nonce(&client, &next, &storage_class()?, &network()?, &nonce)
                     .await?
