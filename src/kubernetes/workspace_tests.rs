@@ -1,6 +1,5 @@
 use super::{Action, client::Client, manifest, workspace};
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt as _;
 
 struct Fixture {
     root: tempfile::TempDir,
@@ -16,9 +15,9 @@ impl Fixture {
                 .expect("namespace");
         }
         std::fs::write(root.path().join("pods.json"), pods.to_string()).expect("pods");
-        std::fs::write(
+        super::test_program::write(
             &program,
-            format!(
+            &format!(
                 r#"#!/bin/sh
 cd '{}'
 printf '%s\n' "$*" >> calls
@@ -33,10 +32,7 @@ esac
 "#,
                 root.path().display()
             ),
-        )
-        .expect("client");
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
-            .expect("executable");
+        );
         Self {
             root,
             client: Client {
@@ -115,12 +111,12 @@ async fn deleting_present_workspace_still_requires_owner_and_no_managed_guests()
 async fn deleting_workspace_never_treats_failed_observation_as_absence() {
     let fixture = Fixture::new(None, json!({"items":[]}));
     std::fs::write(fixture.root.path().join("fail"), "forbidden").expect("failure");
+    let error = workspace(&fixture.client, "tenant", Action::DeleteWorkspace)
+        .await
+        .expect_err("failed authenticated read must hold");
     assert!(
-        workspace(&fixture.client, "tenant", Action::DeleteWorkspace)
-            .await
-            .expect_err("failed authenticated read must hold")
-            .to_string()
-            .contains("kubectl operation failed")
+        error.to_string().contains("kubectl operation failed"),
+        "{error:#}"
     );
     assert_eq!(fixture.calls().lines().count(), 1);
 }
