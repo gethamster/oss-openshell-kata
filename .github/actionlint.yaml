@@ -1,0 +1,10 @@
+self-hosted-runner:
+  labels:
+    - oss-linux-small
+    - oss-ubuntu22-x64
+    - oss-ubuntu24-x64
+    - oss-ubuntu22-arm64
+    - oss-ubuntu24-arm64
+    - oss-ubuntu22-native-x64
+    - oss-ubuntu24-native-x64
+    - oss-ubuntu26-native-x64

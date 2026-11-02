@@ -22,13 +22,16 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'oss-ubuntu24-x64' || matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
       - name: Format
         run: |
           cargo +1.98.0 fmt --check
@@ -44,13 +47,15 @@ jobs:
         run: cargo +1.98.0 run --locked --bin kata-dev -- verify-upstream
 
   hosted-fence:
-    runs-on: ubuntu-latest
+    runs-on: oss-ubuntu24-x64
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        run: rustup toolchain install 1.98.0 --profile minimal
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
       - name: Install object build prerequisites
         run: sudo apt-get update && sudo apt-get install -y zstd
       - name: Build pinned Rust packet fence
