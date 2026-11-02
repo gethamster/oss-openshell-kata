@@ -18,6 +18,7 @@ fn local_prototype_mode_cannot_be_redirected_by_url_userinfo() {
         runtime_profile: openshell_kata::config::RuntimeProfile::Local,
         guest_image: None,
         guest_network_cidr: None,
+        additional_guest_images: Vec::new(),
         recovery_dir: None,
         hosted_network_config: None,
     };
@@ -107,6 +108,7 @@ fn hosted_operator_requires_an_explicit_private_guest_network() {
         runtime_profile: openshell_kata::config::RuntimeProfile::Kubernetes,
         guest_image: Some(format!("registry.example/guest@sha256:{}", "a".repeat(64))),
         guest_network_cidr: None,
+        additional_guest_images: Vec::new(),
         recovery_dir: Some("/private/registry".into()),
         hosted_network_config: None,
     };

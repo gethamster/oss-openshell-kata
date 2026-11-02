@@ -273,3 +273,104 @@ fn local_operator_image_and_resources_are_ceilings_not_request_overrides() -> an
     );
     Ok(())
 }
+
+#[test]
+fn operator_image_allowlist_admits_only_pinned_templates_under_one_vm_profile() -> anyhow::Result<()>
+{
+    use openshell_kata::{admission, config::Config, proto::openshell::compute::v1 as c};
+    let builder = format!("registry.example/builder@sha256:{}", "a".repeat(64));
+    let thread = format!("registry.example/thread-minion@sha256:{}", "c".repeat(64));
+    let workspace = format!("registry.example/team-workspace@sha256:{}", "d".repeat(64));
+    let request = |image: &str| c::DriverSandbox {
+        id: "sandbox-one".into(),
+        spec: Some(c::DriverSandboxSpec {
+            policy: Some(SandboxPolicy {
+                version: 1,
+                ..Default::default()
+            }),
+            template: Some(c::DriverSandboxTemplate {
+                image: image.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let admitted = [builder.as_str(), thread.as_str(), workspace.as_str()];
+    for image in admitted {
+        admission::compile_request_for_images(&request(image), &profile(), &admitted)?;
+    }
+    let other = format!("registry.example/other@sha256:{}", "e".repeat(64));
+    assert!(
+        admission::compile_request_for_images(&request(&other), &profile(), &admitted).is_err(),
+        "an unpinned image is rejected"
+    );
+    assert!(
+        admission::compile_request_for_images(
+            &request("registry.example/thread-minion:latest"),
+            &profile(),
+            &admitted
+        )
+        .is_err(),
+        "a mutable reference is rejected"
+    );
+
+    let mut config = Config {
+        socket: "/tmp/adapter.sock".into(),
+        gateway: "https://127.0.0.1:29670".into(),
+        gateway_ca: "/tmp/ca".into(),
+        lifecycle: "/tmp/lifecycle".into(),
+        lifecycle_arg: Vec::new(),
+        ssh: "/usr/bin/ssh".into(),
+        prototype_policy_mode: false,
+        vm_policy: Some("/etc/vm-policy.json".into()),
+        runtime_profile: openshell_kata::config::RuntimeProfile::Local,
+        guest_image: Some(builder.clone()),
+        guest_network_cidr: None,
+        additional_guest_images: vec![thread.clone(), workspace.clone()],
+        hosted_network_config: None,
+        recovery_dir: None,
+    };
+    assert_eq!(config.admitted_images(), admitted.to_vec());
+    assert_eq!(
+        config.for_sandbox(&request(&thread)).guest_image.as_deref(),
+        Some(thread.as_str())
+    );
+    assert_eq!(
+        config
+            .for_sandbox(&request(&workspace))
+            .guest_image
+            .as_deref(),
+        Some(workspace.as_str())
+    );
+    assert_eq!(
+        config
+            .for_sandbox(&request(&builder))
+            .guest_image
+            .as_deref(),
+        Some(builder.as_str())
+    );
+    assert_eq!(
+        config.for_sandbox(&request(&other)).guest_image.as_deref(),
+        Some(builder.as_str())
+    );
+
+    config.guest_image = None;
+    assert!(
+        config.validate().is_err(),
+        "additional images extend a default operator image"
+    );
+    config.guest_image = Some(builder.clone());
+    config.additional_guest_images = vec!["registry.example/thread-minion:latest".into()];
+    assert!(
+        config.validate().is_err(),
+        "additional images are digest pinned"
+    );
+    config.additional_guest_images = vec![thread];
+    config.runtime_profile = openshell_kata::config::RuntimeProfile::Kubernetes;
+    assert!(
+        config.validate().is_err(),
+        "additional images are a local VM profile feature"
+    );
+    Ok(())
+}

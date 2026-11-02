@@ -63,6 +63,10 @@ pub struct Config {
     pub runtime_profile: RuntimeProfile,
     #[arg(long)]
     pub guest_image: Option<String>,
+    /// Further operator-pinned immutable guest images a sandbox template may select,
+    /// each under the same VM policy as the default `--guest-image`.
+    #[arg(long = "additional-guest-image")]
+    pub additional_guest_images: Vec<String>,
     /// Trusted private Pod network; workload requests cannot select the route.
     #[arg(long)]
     pub guest_network_cidr: Option<String>,
@@ -74,12 +78,62 @@ pub struct Config {
     pub hosted_network_config: Option<PathBuf>,
 }
 impl Config {
+    /// The operator-admitted guest images: the default image first, then any additional ones.
+    pub fn admitted_images(&self) -> Vec<&str> {
+        self.guest_image
+            .iter()
+            .chain(self.additional_guest_images.iter())
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// The configuration for one sandbox: its admitted template image becomes the
+    /// guest image every lifecycle and proof step for that sandbox uses.
+    pub fn for_sandbox(
+        &self,
+        sandbox: &crate::proto::openshell::compute::v1::DriverSandbox,
+    ) -> Self {
+        let image = sandbox
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.template.as_ref())
+            .map(|template| template.image.as_str());
+        match image {
+            Some(image)
+                if self
+                    .additional_guest_images
+                    .iter()
+                    .any(|admitted| admitted == image) =>
+            {
+                Self {
+                    guest_image: Some(image.to_owned()),
+                    ..self.clone()
+                }
+            }
+            _ => self.clone(),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         if let Some(path) = &self.hosted_network_config {
             if self.runtime_profile != RuntimeProfile::Kubernetes || !path.is_absolute() {
                 bail!("hosted network configuration requires Kubernetes and an absolute path");
             }
             crate::kubernetes::HostedNetworkConfig::load(path)?;
+        }
+        if !self.additional_guest_images.is_empty() {
+            if self.runtime_profile != RuntimeProfile::Local
+                || self.guest_image.is_none()
+                || self.vm_policy.is_none()
+                || self.prototype_policy_mode
+            {
+                bail!(
+                    "additional guest images require the enforced local VM profile and a default guest image"
+                );
+            }
+            for image in &self.additional_guest_images {
+                crate::hosted::validate_image(image)?;
+            }
         }
         if let Some(path) = &self.vm_policy {
             if !path.is_absolute()
