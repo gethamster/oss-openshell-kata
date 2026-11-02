@@ -70,22 +70,95 @@ pub async fn execute(
 ) -> Result<Value> {
     validate_id(id)?;
     let state = StateDirectory::new(&settings.state_dir)?;
-    let lockpath = state.root().join(".lock");
-    if std::fs::symlink_metadata(&lockpath).is_ok_and(|m| m.file_type().is_symlink()) {
-        bail!("invalid lifecycle lock");
+    // Operations on one sandbox stay ordered; distinct sandboxes proceed in parallel.
+    let sandbox_lock = LifecycleLock::acquire(state.root().join(format!(".lock-{id}"))).await?;
+    let result = execute_locked(settings, &state, action, id, policy_path, nonce).await;
+    if !state.path(id)?.try_exists()? {
+        // Retire the lock with its sandbox while still holding it; waiters re-open.
+        sandbox_lock.retire()?;
     }
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(lockpath)?;
-    let _lock = tokio::task::spawn_blocking(move || -> Result<File> {
-        file.lock()?;
-        Ok(file)
-    })
-    .await??;
+    result
+}
+
+/// An exclusive advisory lock file that waiters re-open if it is retired under them.
+struct LifecycleLock {
+    path: PathBuf,
+    _file: File,
+}
+
+impl LifecycleLock {
+    async fn acquire(path: PathBuf) -> Result<Self> {
+        loop {
+            if std::fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_file()) {
+                bail!("invalid lifecycle lock");
+            }
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .mode(0o600)
+                .open(&path)
+                .context("opening lifecycle lock")?;
+            let file = tokio::task::spawn_blocking(move || -> Result<File> {
+                file.lock()?;
+                Ok(file)
+            })
+            .await??;
+            use std::os::unix::fs::MetadataExt;
+            let held = file.metadata()?;
+            match std::fs::symlink_metadata(&path) {
+                Ok(current) if current.ino() == held.ino() && current.dev() == held.dev() => {
+                    return Ok(Self { path, _file: file });
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("checking lifecycle lock"),
+            }
+        }
+    }
+
+    fn retire(self) -> Result<()> {
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context("retiring lifecycle lock"),
+        }
+    }
+}
+
+/// Gateway addresses and tunnel ports already held by retained guests.
+fn reservations(state: &StateDirectory) -> Result<(Vec<std::net::Ipv4Addr>, Vec<u16>)> {
+    let mut addresses = Vec::new();
+    let mut ports = Vec::new();
+    for retained in state.retained_ids()? {
+        // A directory without metadata was never assigned an address or port.
+        if let Ok(record) = state.read::<Record>(&retained) {
+            addresses.push(record.attachment.gateway_ip);
+            ports.push(record.route.port);
+        }
+    }
+    Ok((addresses, ports))
+}
+
+fn unreserved_port(reserved: &[u16]) -> Result<u16> {
+    for _ in 0..64 {
+        let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+        if !reserved.contains(&port) {
+            return Ok(port);
+        }
+    }
+    bail!("no unreserved tunnel port available")
+}
+
+async fn execute_locked(
+    settings: &Settings,
+    state: &StateDirectory,
+    action: Action,
+    id: &str,
+    policy_path: Option<&Path>,
+    nonce: Option<&str>,
+) -> Result<Value> {
     let node = Node::with_transport(&settings.vm, settings.node_transport)?;
     let exists = state.path(id)?.try_exists()?;
     if action == Action::Abort {
@@ -96,7 +169,7 @@ pub async fn execute(
         if Some(record.creation_nonce.as_str()) != nonce {
             return Ok(json!({}));
         }
-        return destroy(&node, &state, settings, id, &record).await;
+        return destroy(&node, state, settings, id, &record).await;
     }
     if action == Action::Create {
         let nonce = nonce.context("create requires proof nonce")?;
@@ -112,11 +185,16 @@ pub async fn execute(
             }
             (_, capacity) => capacity,
         };
-        if let Some(capacity) = capacity
-            && state.retained_count()? >= usize::from(capacity)
-        {
-            bail!("node already retains its capacity of {capacity} guest disks");
-        }
+        let check_capacity = || -> Result<()> {
+            if let Some(capacity) = capacity
+                && state.retained_count()? >= usize::from(capacity)
+            {
+                bail!("node already retains its capacity of {capacity} guest disks");
+            }
+            Ok(())
+        };
+        // Refuse early without node access; re-checked under the reservation lock.
+        check_capacity()?;
         if settings.resource_profile == model::ResourceProfile::FoundryBuild
             && settings.image.is_none()
         {
@@ -133,16 +211,22 @@ pub async fn execute(
         ) {
             bail!("container absence could not be confirmed before creation");
         }
-        let attachment = network::plan_attachment(&node, id, nonce).await?;
+        let node_boot = node_boot_id(&node).await?;
+        // Node-wide reservation: capacity, address and port are claimed atomically
+        // with the state record, then released before the long guest boot.
+        let reservation = LifecycleLock::acquire(state.root().join(".lock")).await?;
+        check_capacity()?;
+        let (reserved_addresses, reserved_ports) = reservations(state)?;
+        let attachment = network::plan_attachment(&node, id, nonce, &reserved_addresses).await?;
+        let port = unreserved_port(&reserved_ports)?;
         let directory = state.create(id)?;
-        let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let deadline = policy
             .resources
             .validate(&OperatorCeilings::default())?
             .deadline_from(now()?)?;
         let mut record = Record {
             creation_nonce: nonce.to_owned(),
-            node_boot_id: Some(node_boot_id(&node).await?),
+            node_boot_id: Some(node_boot),
             image: model::selected_image(settings.image.as_deref())?,
             route: Route {
                 sandbox_id: id.to_owned(),
@@ -162,12 +246,13 @@ pub async fn execute(
             cgroup_path: String::new(),
         };
         state.write(id, &record)?;
-        let result = create(&node, &state, settings, id, &record).await;
+        drop(reservation);
+        let result = create(&node, state, settings, id, &record).await;
         match result {
             Ok(created) => {
                 record = created;
                 state.write(id, &record)?;
-                return observe(&node, &state, settings, id, &record, nonce).await;
+                return observe(&node, state, settings, id, &record, nonce).await;
             }
             Err(error) => {
                 return Err(error.context("creation left nonce-bound state for safe abort"));
@@ -195,10 +280,10 @@ pub async fn execute(
         bail!("sandbox state identity mismatch");
     }
     if action == Action::Delete {
-        return destroy(&node, &state, settings, id, &record).await;
+        return destroy(&node, state, settings, id, &record).await;
     }
     if action == Action::Stop {
-        return stop(&node, &state, settings, id, &record).await;
+        return stop(&node, state, settings, id, &record).await;
     }
     if model::selected_image(settings.image.as_deref())? != record.image {
         bail!("operator image differs from retained sandbox intent");
@@ -208,7 +293,7 @@ pub async fn execute(
     let policy = VmPolicy::load(policy_path.context("verification requires a policy file")?)?;
     settings.resource_profile.validate(&policy)?;
     if record.deadline.expired_at(now()?) {
-        let _ = stop(&node, &state, settings, id, &record).await;
+        let _ = stop(&node, state, settings, id, &record).await;
         bail!("sandbox lease expired");
     }
     let record = match action {
@@ -223,7 +308,7 @@ pub async fn execute(
             }
             let record = Record { policy, ..record };
             state.write(id, &record)?;
-            start(&node, &state, settings, id, &record).await?
+            start(&node, state, settings, id, &record).await?
         }
         Action::Update => {
             if policy.resources != record.policy.resources {
@@ -242,7 +327,7 @@ pub async fn execute(
         }
         _ => bail!("unsupported lifecycle transition"),
     };
-    observe(&node, &state, settings, id, &record, nonce).await
+    observe(&node, state, settings, id, &record, nonce).await
 }
 
 async fn create(
@@ -730,6 +815,8 @@ async fn stop_task(node: &Node, settings: &Settings, id: &str, record: &Record) 
     Ok(())
 }
 
+#[cfg(test)]
+mod lock_tests;
 #[cfg(test)]
 #[path = "lifecycle/reboot_tests.rs"]
 mod reboot_tests;

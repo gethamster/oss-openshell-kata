@@ -92,19 +92,28 @@ impl StateDirectory {
     /// # Errors
     /// Rejects unexpected entries, links and directories with unsafe ownership or modes.
     pub fn retained_count(&self) -> Result<usize> {
+        Ok(self.retained_ids()?.len())
+    }
+
+    /// List retained guest identifiers under the held private root capability.
+    ///
+    /// # Errors
+    /// Rejects unexpected entries, links and directories with unsafe ownership or modes.
+    pub fn retained_ids(&self) -> Result<Vec<String>> {
         self.check_root()?;
-        let mut count = 0;
+        let mut ids = Vec::new();
         for entry in self.directory.entries()? {
             let entry = entry?;
             let name = entry.file_name();
-            if name == ".lock" || name == ".t" {
+            let name = name.to_str().context("non-UTF8 runtime state entry")?;
+            // Node and per-sandbox lifecycle locks are regular files, never retained guests.
+            if name == ".t" || name.starts_with(".lock") {
                 continue;
             }
-            let name = name.to_str().context("non-UTF8 runtime state entry")?;
             self.open_state(name)?;
-            count += 1;
+            ids.push(name.to_owned());
         }
-        Ok(count)
+        Ok(ids)
     }
 
     /// Exclusively create one private sandbox directory.

@@ -115,7 +115,17 @@ requires it for `foundry-build`. Both refuse a new guest once the retained
 count reaches the capacity. Capacity is not part of the recovery binding, so
 raising it keeps retained guests; lowering it below the retained count makes
 the adapter refuse to start until guests are deleted. Set it to the
-`max_sandboxes` value in the node's `node.json` (see below). Guest memory is
+`max_sandboxes` value in the node's `node.json` (see below).
+
+Lifecycle operations on distinct guests run in parallel; operations on one
+guest stay ordered behind a per-guest lock. A create holds the node-wide lock
+only while it claims capacity, a private address and a tunnel port with its
+state record, never during boot. The adapter runs at most 16 provisioning and
+16 revalidation lifecycle processes at once, and each execution deadline starts
+only when its slot is granted. Unchanged running guests are re-proven every 30
+seconds (policy changes apply at the next 5-second heartbeat). A missed deadline
+under host load defers the proof; a guest is stopped only for a verified
+mismatch or after 300 seconds without a successful proof. Guest memory is
 allocated lazily and disks are thin, so capacity is bounded by real use rather
 than by 32 vCPU / 128 GiB / 256 GiB per guest.
 
