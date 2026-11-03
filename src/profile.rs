@@ -63,7 +63,7 @@ impl VmPolicy {
     pub fn compile(&self, native: &SandboxPolicy) -> Result<Self> {
         self.validate()?;
         Ok(Self {
-            network: crate::network::compile_native(native, &self.network)?,
+            network: crate::network::compile_native_with_inspection(native, &self.network)?,
             ..self.clone()
         })
     }

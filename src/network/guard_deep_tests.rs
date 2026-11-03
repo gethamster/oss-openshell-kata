@@ -10,6 +10,7 @@ fn policy() -> NetworkPolicy {
             host: "example.com".into(),
             port: 443,
         }],
+        ..Default::default()
     }
 }
 fn config() -> HostedBrokerConfig {
@@ -341,6 +342,7 @@ async fn stale_or_changed_inventory_and_widening_leave_current_authority_unchang
             host: "foreign.example.com".into(),
             port: 443,
         }],
+        ..Default::default()
     };
     assert!(
         broker

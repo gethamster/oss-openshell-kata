@@ -124,19 +124,22 @@ impl Guest {
     }
     /// Execute the gateway's command as one literal Bash command argument.
     /// Non-login execution also clears shell startup-file environment hooks.
+    /// `environment` carries provider placeholders and trust settings only.
     pub fn exec_shell(
         &self,
         config: &Config,
         command: Option<&str>,
         mode: ShellMode,
+        environment: &[(String, String)],
     ) -> Result<Child> {
-        let mut invocation = match mode {
-            ShellMode::Login => "exec /bin/bash -l",
-            ShellMode::NonLogin => {
-                "exec /usr/bin/env -u BASH_ENV -u ENV /bin/bash --noprofile --norc"
-            }
-        }
-        .to_owned();
+        let assignments = environment_assignments(environment)?;
+        let mut invocation = match (mode, assignments.is_empty()) {
+            (ShellMode::Login, true) => "exec /bin/bash -l".to_owned(),
+            (ShellMode::Login, false) => format!("exec /usr/bin/env{assignments} /bin/bash -l"),
+            (ShellMode::NonLogin, _) => format!(
+                "exec /usr/bin/env -u BASH_ENV -u ENV{assignments} /bin/bash --noprofile --norc"
+            ),
+        };
         if let Some(command) = command {
             invocation.push_str(" -c ");
             invocation.push_str(&crate::config::shell_quote(command));
@@ -172,6 +175,82 @@ impl Guest {
             .spawn()
             .context("starting guest TCP relay")
     }
+}
+
+/// Render validated `NAME=value` arguments for `/usr/bin/env`, each quoted.
+pub fn environment_assignments(environment: &[(String, String)]) -> Result<String> {
+    let mut rendered = String::new();
+    for (name, value) in environment {
+        let mut bytes = name.bytes();
+        if !bytes
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+            || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            bail!("invalid guest environment name");
+        }
+        rendered.push(' ');
+        rendered.push_str(&crate::config::shell_quote(&format!("{name}={value}")));
+    }
+    Ok(rendered)
+}
+
+/// Install one provider snapshot in the sandbox's host broker.
+///
+/// The protobuf snapshot carries credentials, so it travels only over the
+/// lifecycle helper's stdin; the result holds placeholders and the public CA.
+pub async fn install_provider_credentials(
+    config: &Config,
+    id: &SandboxId,
+    snapshot: &[u8],
+) -> Result<crate::network::mediation::GuestMaterial> {
+    use tokio::io::AsyncWriteExt;
+    let mut command = Command::new(&config.lifecycle);
+    command
+        .args(&config.lifecycle_arg)
+        .arg("credentials")
+        .arg(id.as_str());
+    hosted_environment(&mut command, config);
+    command
+        .env_remove("SSH_AUTH_SOCK")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let _slot = lifecycle_slots("verify")
+        .acquire()
+        .await
+        .context("lifecycle slots closed")?;
+    let output = tokio::time::timeout(Duration::from_secs(30), async {
+        let mut child = command.spawn().context("running provider installation")?;
+        let mut stdin = child.stdin.take().context("lifecycle stdin unavailable")?;
+        let feed = async move {
+            stdin.write_all(snapshot).await?;
+            stdin.shutdown().await
+        };
+        let (fed, output) = tokio::join!(feed, child.wait_with_output());
+        let output = output.context("running provider installation")?;
+        if output.status.success() {
+            fed.context("sending provider snapshot")?;
+        }
+        Ok::<_, anyhow::Error>(output)
+    })
+    .await
+    .context("provider installation timed out")??;
+    if !output.status.success() {
+        let diagnostic: String = String::from_utf8_lossy(&output.stderr)
+            .chars()
+            .take(4096)
+            .collect();
+        tracing::error!(sandbox=%id, stderr=%diagnostic, "provider installation failed");
+        bail!("provider installation failed with status {}", output.status);
+    }
+    let material: crate::network::mediation::GuestMaterial =
+        serde_json::from_slice(&output.stdout).context("decoding provider material")?;
+    if material.sandbox_id != id.as_str() {
+        bail!("provider material names another sandbox");
+    }
+    Ok(material)
 }
 
 /// Concurrent lifecycle processes that provision or tear down guests.
@@ -460,6 +539,25 @@ async fn bounded_output(mut command: Command, duration: Duration) -> Result<std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_environment_is_quoted_and_names_are_validated() {
+        let rendered = environment_assignments(&[
+            (
+                "CLAUDE_CODE_OAUTH_TOKEN".into(),
+                "openshell:resolve:env:CLAUDE_CODE_OAUTH_TOKEN".into(),
+            ),
+            ("X".into(), "a'b $c".into()),
+        ])
+        .expect("valid environment");
+        assert_eq!(
+            rendered,
+            " 'CLAUDE_CODE_OAUTH_TOKEN=openshell:resolve:env:CLAUDE_CODE_OAUTH_TOKEN' 'X=a'\\''b $c'"
+        );
+        for name in ["", "1X", "A-B", "A B", "A=B"] {
+            assert!(environment_assignments(&[(name.into(), "v".into())]).is_err());
+        }
+    }
 
     #[tokio::test]
     async fn hanging_runtime_command_has_a_deadline() {

@@ -29,6 +29,10 @@ OpenShell policy may narrow its TCP destination ceiling; it cannot expand it.
 An empty native network policy denies all egress even if the operator profile
 permits destinations. The compiler rejects unsupported native filesystem,
 Landlock, process-identity, binary-identity, L7, and credential requirements.
+Attached OpenShell provider credentials are supported only through inspected
+REST endpoints: the host broker terminates guest TLS with a per-sandbox CA and
+substitutes placeholders, so real credentials never enter the guest (see
+[the enforcement contract](docs/ENFORCEMENT_CONTRACT.md#provider-credentials-are-injected-by-the-host-broker)).
 
 The local resource profile is one vCPU, 2048 MiB guest RAM and 2048 MiB writable disk.
 The host reserves another 256 MiB for the Kata runtime, so both enclosing host

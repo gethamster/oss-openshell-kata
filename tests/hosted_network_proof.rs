@@ -22,6 +22,7 @@ fn fixture() -> anyhow::Result<(tempfile::TempDir, c::DriverSandbox, NetworkPoli
             host: "registry.npmjs.org".into(),
             port: 443,
         }],
+        ..Default::default()
     };
     let mut native = s::SandboxPolicy {
         version: 1,

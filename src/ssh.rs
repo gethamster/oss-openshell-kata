@@ -102,16 +102,23 @@ impl Handler {
                     crate::download::serve(channel, runtime, &command).await
                 }
                 Operation::Exec(command) => {
-                    match runtime
-                        .guest
-                        .exec_shell(&runtime.config, Some(&command), shell_mode)
-                    {
+                    match runtime.guest.exec_shell(
+                        &runtime.config,
+                        Some(&command),
+                        shell_mode,
+                        &runtime.guest_environment(),
+                    ) {
                         Ok(child) => bridge(channel, child, runtime).await,
                         Err(error) => Err(error),
                     }
                 }
                 Operation::Shell => {
-                    match runtime.guest.exec_shell(&runtime.config, None, shell_mode) {
+                    match runtime.guest.exec_shell(
+                        &runtime.config,
+                        None,
+                        shell_mode,
+                        &runtime.guest_environment(),
+                    ) {
                         Ok(child) => bridge(channel, child, runtime).await,
                         Err(error) => Err(error),
                     }

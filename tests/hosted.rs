@@ -147,6 +147,7 @@ fn hosted_network_is_explicit_and_cannot_expand_initial_authority() -> anyhow::R
             host: "registry.npmjs.org".into(),
             port: 443,
         }],
+        ..Default::default()
     };
     assert_eq!(
         hosted::validate_brokered_request(&input, &image, &ceiling)?,

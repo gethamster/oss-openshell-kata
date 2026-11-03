@@ -1,5 +1,6 @@
 mod credentials;
 
+use crate::network::mediation::GuestMaterial;
 use crate::{
     admission,
     config::{Config, RuntimeProfile, SandboxId, shell_quote},
@@ -8,7 +9,9 @@ use crate::{
     ssh,
 };
 use anyhow::{Context, Result, bail};
+use prost::Message as _;
 use serde::Deserialize;
+use sha2::Digest as _;
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -72,6 +75,15 @@ fn mark_failed(phase: &watch::Sender<Phase>) -> bool {
             false
         }
     })
+}
+
+/// A buffer holding credential material, cleared when dropped.
+struct Zeroizing(Vec<u8>);
+impl Drop for Zeroizing {
+    fn drop(&mut self) {
+        self.0.iter_mut().for_each(|byte| *byte = 0);
+        std::hint::black_box(&self.0);
+    }
 }
 
 struct GatewayCredential {
@@ -215,7 +227,16 @@ pub struct Runtime {
     credential_handshakes: tokio::sync::RwLock<()>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     endpoint: Mutex<Option<tempfile::TempDir>>,
+    /// Workload-facing provider material from the host broker: placeholders
+    /// and the public proxy CA, never credential values.
+    guest_material: RwLock<Option<Arc<GuestMaterial>>>,
+    /// Digest of the provider snapshot last installed in the host broker.
+    provider_digest: Mutex<Option<[u8; 32]>>,
 }
+
+/// How many times a provider snapshot that changed between the configuration
+/// and environment reads is fetched again before supervision fails.
+const PROVIDER_SNAPSHOT_ATTEMPTS: usize = 3;
 /// Bound on one revalidation round, so heartbeats keep flowing under host load.
 const REVALIDATION_DEADLINE: Duration = Duration::from_secs(20);
 /// Cadence of full native runtime proofs while the effective policy is unchanged.
@@ -298,7 +319,23 @@ impl Runtime {
             authentication: auth,
             tasks: Mutex::new(Vec::new()),
             endpoint: Mutex::new(None),
+            guest_material: RwLock::new(None),
+            provider_digest: Mutex::new(None),
         }))
+    }
+    /// Whether attached provider credentials are injected by the host broker.
+    fn mediates_providers(&self) -> bool {
+        self.operator_policy.is_some() && self.hosted_network.is_none()
+    }
+    /// Environment for guest commands: provider placeholders and the proxy
+    /// CA trust settings, as the native supervisor gives its children.
+    pub fn guest_environment(&self) -> Vec<(String, String)> {
+        self.guest_material
+            .read()
+            .ok()
+            .and_then(|material| material.clone())
+            .map(|material| material.guest_environment())
+            .unwrap_or_default()
     }
     /// Whether execution requires the verified VM boundary to be Ready.
     pub fn is_enforced(&self) -> bool {
@@ -415,7 +452,7 @@ impl Runtime {
             }
         };
         let mut applied = self.vm_policy.clone();
-        self.check_providers(&mut client, &snapshot).await?;
+        let (snapshot, providers) = self.paired_snapshots(&mut client, snapshot).await?;
         let mut attempt = 0;
         // A boot burst can delay the first proof; a missed deadline is retried, a
         // verified mismatch is not.
@@ -428,6 +465,8 @@ impl Runtime {
                 result => break result?,
             }
         }
+        // Placeholders and trust must exist before the workload starts.
+        self.sync_providers(&providers, applied.as_ref()).await?;
         if self.config.runtime_profile == RuntimeProfile::Kubernetes
             && self.hosted_network.is_none()
         {
@@ -490,7 +529,7 @@ impl Runtime {
                                 let mut request = self.request(s::GetSandboxConfigRequest { name:self.spec.name.clone(), ..Default::default() })?;
                                 request.set_timeout(Duration::from_secs(10));
                                 let effective = client.get_sandbox_config(request).await?.into_inner();
-                                self.check_providers(&mut client,&effective).await?;
+                                let (effective, providers) = self.paired_snapshots(&mut client, effective).await?;
                                 // Policy changes apply at once; unchanged native guests are
                                 // re-proven on a slower cadence to bound host load at fleet scale.
                                 let proven = self.operator_policy.is_none()
@@ -499,6 +538,7 @@ impl Runtime {
                                 if proven {
                                     self.enforce_snapshot(&effective,&mut applied).await?;
                                 }
+                                self.sync_providers(&providers, applied.as_ref()).await?;
                                 if self.config.runtime_profile == RuntimeProfile::Kubernetes && self.hosted_network.is_none() {
                                         if effective.version!=last_snapshot.version || effective.config_revision!=last_snapshot.config_revision { bail!("effective policy changed; hosted runtime must be reprovisioned"); }
                                         let _validated = crate::policy::validate_policy(effective.policy.as_ref().context("effective hosted policy required")?)?;
@@ -594,31 +634,91 @@ impl Runtime {
         *applied = Some(next);
         Ok(())
     }
-    async fn check_providers(
+    /// Read the provider environment that belongs to `config`, re-reading
+    /// both when a provider refresh lands between the two requests.
+    async fn paired_snapshots(
         &self,
         client: &mut o::open_shell_client::OpenShellClient<Channel>,
-        snapshot: &s::GetSandboxConfigResponse,
-    ) -> Result<()> {
-        let providers = client
-            .get_sandbox_provider_environment(self.request(
-                o::GetSandboxProviderEnvironmentRequest {
-                    sandbox_id: self.id.to_string(),
-                    ..Default::default()
-                },
-            )?)
-            .await?
-            .into_inner();
-        if !providers.environment.is_empty()
-            || !providers.dynamic_credentials.is_empty()
-            || !providers.static_credential_bindings.is_empty()
-            || !providers.files.is_empty()
-            || providers.readiness_reason != 0
-            || providers.provider_env_revision != snapshot.provider_env_revision
-            || providers.provider_attachment_epoch != snapshot.provider_attachment_epoch
-            || providers.policy_hash != snapshot.policy_hash
-        {
-            bail!("provider snapshot is unsupported or does not match effective configuration");
+        mut config: s::GetSandboxConfigResponse,
+    ) -> Result<(
+        s::GetSandboxConfigResponse,
+        o::GetSandboxProviderEnvironmentResponse,
+    )> {
+        let mediated = self.mediates_providers();
+        for attempt in 1..=PROVIDER_SNAPSHOT_ATTEMPTS {
+            let mut request = self.request(o::GetSandboxProviderEnvironmentRequest {
+                sandbox_id: self.id.to_string(),
+                // The host broker scopes static credentials to their bound
+                // endpoints and keeps stable placeholders across refreshes.
+                supports_static_credential_bindings: mediated,
+                supports_stable_placeholder_environment_keys: mediated,
+            })?;
+            request.set_timeout(Duration::from_secs(10));
+            let providers = client
+                .get_sandbox_provider_environment(request)
+                .await?
+                .into_inner();
+            if providers.provider_env_revision == config.provider_env_revision
+                && providers.provider_attachment_epoch == config.provider_attachment_epoch
+                && providers.policy_hash == config.policy_hash
+            {
+                return Ok((config, providers));
+            }
+            if attempt == PROVIDER_SNAPSHOT_ATTEMPTS {
+                break;
+            }
+            let mut request = self.request(s::GetSandboxConfigRequest {
+                name: self.spec.name.clone(),
+                ..Default::default()
+            })?;
+            request.set_timeout(Duration::from_secs(10));
+            config = client.get_sandbox_config(request).await?.into_inner();
         }
+        bail!("provider snapshot is unsupported or does not match effective configuration");
+    }
+    /// Install changed provider snapshots in the host broker and publish the
+    /// resulting placeholders; other profiles admit no provider material.
+    async fn sync_providers(
+        &self,
+        providers: &o::GetSandboxProviderEnvironmentResponse,
+        applied: Option<&crate::profile::VmPolicy>,
+    ) -> Result<()> {
+        if !self.mediates_providers() {
+            if !providers.environment.is_empty()
+                || !providers.dynamic_credentials.is_empty()
+                || !providers.static_credential_bindings.is_empty()
+                || !providers.files.is_empty()
+                || providers.readiness_reason != 0
+            {
+                bail!("provider snapshot is unsupported or does not match effective configuration");
+            }
+            return Ok(());
+        }
+        let inspected = applied.is_some_and(|policy| !policy.network.tls_inspect.is_empty());
+        let mut installed = self.provider_digest.lock().await;
+        if installed.is_none() && providers.environment.is_empty() && !inspected {
+            return Ok(());
+        }
+        let snapshot = Zeroizing(providers.encode_to_vec());
+        let digest: [u8; 32] = sha2::Sha256::digest(&snapshot.0).into();
+        if *installed == Some(digest) {
+            return Ok(());
+        }
+        let material =
+            crate::guest::install_provider_credentials(&self.config, &self.id, &snapshot.0).await?;
+        drop(snapshot);
+        if let Some(reason) = &material.withheld {
+            tracing::warn!(sandbox=%self.id, %reason, "provider credentials revoked in the host broker");
+        }
+        if inspected && material.ca_certificate.is_none() {
+            tracing::warn!(sandbox=%self.id, "guest predates host TLS inspection; inspected destinations are refused");
+        }
+        *self
+            .guest_material
+            .write()
+            .map_err(|_| anyhow::anyhow!("provider material lock unavailable"))? =
+            Some(Arc::new(material));
+        *installed = Some(digest);
         Ok(())
     }
     async fn report_accepted(
@@ -667,6 +767,12 @@ impl Runtime {
         if command.is_empty() {
             bail!("canonical main command required");
         }
+        let assignments = crate::guest::environment_assignments(&self.guest_environment())?;
+        let command = if assignments.is_empty() {
+            command
+        } else {
+            format!("exec /usr/bin/env{assignments} {command}")
+        };
         let mut child = self.guest.exec(&self.config, &command)?;
         // The canonical main process is noninteractive in this bounded adapter.
         child.stdin.take();

@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
@@ -15,17 +15,56 @@ pub struct Endpoint {
     pub port: u16,
 }
 
+/// The HTTP methods an inspected REST endpoint admits, as OpenShell's access
+/// presets define them (`read-only`, `read-write`, `full`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RestAccess {
+    ReadOnly,
+    ReadWrite,
+    Full,
+}
+impl RestAccess {
+    /// OpenShell's REST preset expansion: read-only is GET/HEAD/OPTIONS,
+    /// read-write adds POST/PUT/PATCH, and full admits every method.
+    pub fn allows(self, method: &str) -> bool {
+        match self {
+            Self::Full => true,
+            Self::ReadWrite => matches!(
+                method,
+                "GET" | "HEAD" | "OPTIONS" | "POST" | "PUT" | "PATCH"
+            ),
+            Self::ReadOnly => matches!(method, "GET" | "HEAD" | "OPTIONS"),
+        }
+    }
+}
+
+/// A TCP destination whose TLS the host broker terminates for L7 REST handling
+/// and provider credential placeholder substitution.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InspectedEndpoint {
+    pub host: String,
+    pub port: u16,
+    pub access: RestAccess,
+}
+
 /// The only guest egress destinations; an empty list permits none.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkPolicy {
     #[serde(default)]
     pub tcp_allow: Vec<Endpoint>,
+    /// Allowed destinations that the broker inspects instead of relaying
+    /// opaquely. Each must also appear in `tcp_allow`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tls_inspect: Vec<InspectedEndpoint>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatedNetworkPolicy {
     allowed: BTreeSet<Endpoint>,
+    inspected: BTreeMap<Endpoint, RestAccess>,
 }
 impl NetworkPolicy {
     /// Return the canonical exact endpoint set.
@@ -71,17 +110,47 @@ impl NetworkPolicy {
                 port: endpoint.port,
             });
         }
-        Ok(ValidatedNetworkPolicy { allowed })
+        let mut inspected = BTreeMap::new();
+        for endpoint in &self.tls_inspect {
+            let key = Endpoint {
+                host: normalize_host(&endpoint.host)?,
+                port: endpoint.port,
+            };
+            if !allowed.contains(&key) {
+                bail!("inspected destinations must also be allowed TCP destinations");
+            }
+            if key.host.parse::<IpAddr>().is_ok() {
+                bail!("inspected destinations require a DNS name for TLS verification");
+            }
+            if inspected.insert(key, endpoint.access).is_some() {
+                bail!("duplicate inspected destination");
+            }
+        }
+        Ok(ValidatedNetworkPolicy { allowed, inspected })
     }
 }
 impl ValidatedNetworkPolicy {
     pub(crate) fn normalized(&self) -> NetworkPolicy {
         NetworkPolicy {
             tcp_allow: self.allowed.iter().cloned().collect(),
+            tls_inspect: self
+                .inspected
+                .iter()
+                .map(|(endpoint, access)| InspectedEndpoint {
+                    host: endpoint.host.clone(),
+                    port: endpoint.port,
+                    access: *access,
+                })
+                .collect(),
         }
     }
     pub fn allows(&self, host: &str, port: u16) -> bool {
         normalize_host(host).is_ok_and(|host| self.allowed.contains(&Endpoint { host, port }))
+    }
+    /// The REST access of a destination the broker must inspect, if any.
+    pub fn inspection(&self, host: &str, port: u16) -> Option<RestAccess> {
+        let host = normalize_host(host).ok()?;
+        self.inspected.get(&Endpoint { host, port }).copied()
     }
 }
 

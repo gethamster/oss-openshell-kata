@@ -8,6 +8,7 @@ fn exact_endpoints_are_normalized_and_wildcards_rejected() {
             host: "Registry.NPMJS.org.".into(),
             port: 443,
         }],
+        ..Default::default()
     }
     .validate()
     .expect("valid policy");
@@ -28,7 +29,8 @@ fn exact_endpoints_are_normalized_and_wildcards_rejected() {
                 tcp_allow: vec![Endpoint {
                     host: host.into(),
                     port: 443
-                }]
+                }],
+                ..Default::default()
             }
             .validate()
             .is_err(),

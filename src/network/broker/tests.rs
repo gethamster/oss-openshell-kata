@@ -32,6 +32,7 @@ fn policy(host: &str, port: u16) -> NetworkPolicy {
             host: host.into(),
             port,
         }],
+        ..Default::default()
     }
 }
 async fn echo() -> Result<(SocketAddr, JoinHandle<()>)> {
@@ -79,6 +80,7 @@ async fn connect_streams_bytes_and_policy_update_revokes_existing_connections() 
         "127.0.0.1:0".parse()?,
         policy("allowed.example", 443),
         connector,
+        None,
     )
     .await?;
     let mut stream = request(
@@ -161,6 +163,7 @@ async fn policy_revocation_cancels_pending_dns_before_any_connection() -> Result
         "127.0.0.1:0".parse()?,
         policy("allowed.example", 443),
         connector.clone(),
+        None,
     )
     .await?;
     let mut stream = TcpStream::connect(broker.local_addr()).await?;
@@ -192,6 +195,7 @@ async fn dropping_broker_closes_active_tunnels() -> Result<()> {
         "127.0.0.1:0".parse()?,
         policy("allowed.example", 443),
         connector,
+        None,
     )
     .await?;
     let mut stream = request(
@@ -221,6 +225,7 @@ async fn mixed_or_rebound_private_dns_answers_are_rejected_before_connect() -> R
         "127.0.0.1:0".parse()?,
         policy("allowed.example", 443),
         connector.clone(),
+        None,
     )
     .await?;
     let mut stream = TcpStream::connect(broker.local_addr()).await?;
@@ -277,6 +282,7 @@ async fn forwards_normal_http_post_with_single_request_framing() -> Result<()> {
         "127.0.0.1:0".parse()?,
         policy("allowed.example", 80),
         connector,
+        None,
     )
     .await?;
     let mut stream = TcpStream::connect(broker.local_addr()).await?;

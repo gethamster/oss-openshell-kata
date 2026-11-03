@@ -423,6 +423,7 @@ async fn create(
     ] {
         copy_guest_file(node, id, &source, destination).await?;
     }
+    install_proxy_trust(node, settings, id).await?;
     let key = std::fs::read_to_string(directory.join("host_key.pub"))?;
     let mut fields = key.split_whitespace();
     let algorithm = fields.next().context("missing host key algorithm")?;
@@ -432,6 +433,48 @@ async fn create(
         format!("[127.0.0.1]:{} {algorithm} {value}\n", record.route.port),
     )?;
     start(node, state, settings, id, &record).await
+}
+
+/// Generate the sandbox's proxy CA on the node and trust its public
+/// certificate in the pristine operator image before any guest code runs.
+async fn install_proxy_trust(node: &Node, settings: &Settings, id: &str) -> Result<()> {
+    network::generate_proxy_ca(node, &settings.node_binary, id).await?;
+    let native = inspect(node, id).await?;
+    let device = storage_device(node, &native).await?;
+    let root = format!("{}/trusted-root", network::job_directory(id));
+    node.node(&args(&["mkdir", "-p", &root])).await?;
+    let install = async {
+        node.node(&args(&["mount", &device, &root])).await?;
+        network::install_guest_trust(node, &settings.node_binary, id, &root).await
+    }
+    .await;
+    let unmount = node.node(&args(&["umount", &root])).await;
+    install?;
+    unmount?;
+    Ok(())
+}
+
+/// Install one provider snapshot into the sandbox's running broker. Returns
+/// only workload-facing material: placeholders and the public CA.
+///
+/// # Errors
+/// Fails for an unknown sandbox, a broker without mediation, or a mismatched
+/// broker response.
+pub async fn install_credentials(settings: &Settings, id: &str, snapshot: &[u8]) -> Result<Value> {
+    validate_id(id)?;
+    let state = StateDirectory::new(&settings.state_dir)?;
+    let _lock = LifecycleLock::acquire(state.root().join(format!(".lock-{id}"))).await?;
+    let record: Record = state.read(id)?;
+    if record.route.sandbox_id != id {
+        bail!("sandbox state identity mismatch");
+    }
+    record
+        .network
+        .as_ref()
+        .context("sandbox has no installed network broker")?;
+    let node = Node::with_transport(&settings.vm, settings.node_transport)?;
+    let nonce = uuid::Uuid::new_v4().to_string();
+    network::install_credentials(&node, &settings.node_binary, id, snapshot, &nonce).await
 }
 
 async fn copy_guest_file(node: &Node, id: &str, source: &Path, destination: &str) -> Result<()> {
@@ -817,6 +860,7 @@ async fn destroy(
     transport::close_tunnel(node, state, id).await?;
     network::stop_unit(node, &unit(id)).await?;
     network::remove(node, &settings.node_binary, id, &record.attachment).await?;
+    network::remove_proxy_ca(node, id).await?;
     state.remove(id)?;
     Ok(json!({}))
 }
