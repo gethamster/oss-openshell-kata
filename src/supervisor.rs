@@ -523,6 +523,9 @@ impl Runtime {
                     sandbox_id: self.id.to_string(),
                     instance_id: self.instance.clone(),
                     connection_epoch: 1,
+                    // The gateway accepts readiness evidence only from a supervisor
+                    // that advertises it; mediated sandboxes report each heartbeat.
+                    supports_provider_readiness: self.mediates_providers(),
                     ..Default::default()
                 })),
             })
