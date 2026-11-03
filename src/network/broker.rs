@@ -1,4 +1,5 @@
 use super::{
+    mediation::Mediation,
     policy::{NetworkPolicy, ValidatedNetworkPolicy, globally_routable},
     proxy,
 };
@@ -95,6 +96,7 @@ struct State {
     update: Mutex<()>,
     shutdown: CancellationToken,
     connector: Arc<dyn Connector>,
+    mediation: Option<Arc<Mediation>>,
 }
 
 /// A host-side proxy whose allowlist is distinct from the guest network fence.
@@ -127,11 +129,18 @@ impl BrokerHandle {
     pub fn local_addr(&self) -> SocketAddr {
         self.address
     }
+    /// Provider credential mediation bound to this sandbox, if configured.
+    pub fn mediation(&self) -> Option<&Arc<Mediation>> {
+        self.state.mediation.as_ref()
+    }
     /// Revoke and close every old-generation connection before publishing a new policy.
     pub async fn replace_policy(&self, policy: NetworkPolicy) -> Result<u64> {
         self.replace_policy_inner(policy, false).await
     }
     pub(super) async fn deny_and_drain(&self) -> Result<u64> {
+        if let Some(mediation) = &self.state.mediation {
+            mediation.revoke();
+        }
         self.replace_policy_inner(NetworkPolicy::default(), true)
             .await
     }
@@ -186,18 +195,26 @@ impl BrokerHandle {
 impl Drop for BrokerHandle {
     fn drop(&mut self) {
         self.state.shutdown.cancel();
+        if let Some(mediation) = &self.state.mediation {
+            mediation.revoke();
+        }
     }
 }
 
 /// Bind on a private host address. The caller must install the interface fence
 /// before exposing the guest network; this function alone is not isolation.
-pub async fn bind_broker(address: SocketAddr, policy: NetworkPolicy) -> Result<BrokerHandle> {
-    bind_with_connector(address, policy, Arc::new(SystemConnector)).await
+pub async fn bind_broker(
+    address: SocketAddr,
+    policy: NetworkPolicy,
+    mediation: Option<Mediation>,
+) -> Result<BrokerHandle> {
+    bind_with_connector(address, policy, Arc::new(SystemConnector), mediation).await
 }
 pub(super) async fn bind_with_connector(
     address: SocketAddr,
     policy: NetworkPolicy,
     connector: Arc<dyn Connector>,
+    mediation: Option<Mediation>,
 ) -> Result<BrokerHandle> {
     if address.ip().is_unspecified()
         || address.ip().is_multicast()
@@ -219,6 +236,7 @@ pub(super) async fn bind_with_connector(
         update: Mutex::new(()),
         shutdown: CancellationToken::new(),
         connector,
+        mediation: mediation.map(Arc::new),
     });
     let runner = state.clone();
     let task = tokio::spawn(async move {
@@ -237,15 +255,15 @@ async fn serve(listener: TcpListener, state: Arc<State>) {
         tokio::select! {
             ()=state.shutdown.cancelled()=>break,
             accepted=listener.accept()=>{
-                let Ok((socket,_))=accepted else{break;};
+                let Ok((socket,peer))=accepted else{break;};
                 let Ok(permit)=permits.clone().try_acquire_owned() else{drop(socket);continue;};
                 let guard=state.current.read().await;
                 let GenerationState::Active(generation)=&*guard else{drop(socket);continue;};let generation=generation.clone();
                 generation.active.fetch_add(1,Ordering::AcqRel);let lease=Lease(generation.clone());drop(guard);
-                let connector=state.connector.clone();let shutdown=state.shutdown.clone();let authorization=connector.cancellation();
+                let connector=state.connector.clone();let mediation=state.mediation.clone();let shutdown=state.shutdown.clone();let authorization=connector.cancellation();
                 tasks.spawn(async move{let _permit=permit;let _lease=lease;tokio::select!{
                     ()=shutdown.cancelled()=>{},()=generation.cancel.cancelled()=>{},()=authorization.cancelled()=>{},
-                    result=connection(socket,&generation.policy,connector.as_ref())=>{if let Err(error)=result{tracing::debug!(%error,"broker connection ended");}}
+                    result=connection(socket,peer,&generation.policy,connector.as_ref(),mediation.as_deref())=>{if let Err(error)=result{tracing::debug!(%error,"broker connection ended");}}
                 }});
             }
             Some(_)=tasks.join_next(),if !tasks.is_empty()=>{}
@@ -266,8 +284,10 @@ async fn reject(writer: &mut (impl AsyncWrite + Unpin), status: &str) -> Result<
 }
 async fn connection(
     socket: TcpStream,
+    peer: SocketAddr,
     policy: &ValidatedNetworkPolicy,
     connector: &dyn Connector,
+    mediation: Option<&Mediation>,
 ) -> Result<()> {
     let (reader, mut writer) = socket.into_split();
     let mut reader = BufReader::new(reader);
@@ -280,6 +300,22 @@ async fn connection(
         tracing::info!(host=%request.target.host,port=request.target.port,"egress destination denied by policy");
         return reject(&mut writer, "403 Forbidden").await;
     }
+    let inspection = policy.inspection(&request.target.host, request.target.port);
+    let mediation = match (inspection, mediation) {
+        (None, _) => None,
+        // Credential injection requires TLS through CONNECT, from this guest only.
+        (Some(access), Some(mediation))
+            if request.forward.is_none()
+                && mediation.inspects()
+                && mediation.admits_peer(peer.ip()) =>
+        {
+            Some((access, mediation))
+        }
+        (Some(_), _) => {
+            tracing::info!(host=%request.target.host,port=request.target.port,"inspected destination refused outside its guest tunnel");
+            return reject(&mut writer, "403 Forbidden").await;
+        }
+    };
     let addresses = match connector
         .resolve(&request.target.host, request.target.port)
         .await
@@ -304,6 +340,21 @@ async fn connection(
     let Some(mut upstream) = upstream else {
         return reject(&mut writer, "502 Bad Gateway").await;
     };
+    if let Some((access, mediation)) = mediation {
+        writer
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await?;
+        let client = tokio::io::join(reader, writer);
+        return mediation
+            .relay(
+                client,
+                upstream,
+                &request.target.host,
+                request.target.port,
+                access,
+            )
+            .await;
+    }
     if let Some(head) = request.forward {
         upstream.write_all(&head).await?;
         let (mut upstream_read, mut upstream_write) = tokio::io::split(upstream);

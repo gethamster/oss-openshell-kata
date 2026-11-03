@@ -80,6 +80,7 @@ mod tests {
                     host: "registry.npmjs.org".into(),
                     port: 443,
                 }],
+                ..Default::default()
             },
         };
         assert_eq!(

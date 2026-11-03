@@ -116,11 +116,28 @@ impl Node {
         args: &[OsString],
         timeout: Duration,
     ) -> Result<Output> {
+        self.raw_command_with_input(program, args, timeout, None)
+            .await
+    }
+
+    /// Execute a command, writing private input to its stdin instead of
+    /// exposing it in arguments, the environment, or a file.
+    async fn raw_command_with_input(
+        &self,
+        program: impl AsRef<OsStr>,
+        args: &[OsString],
+        timeout: Duration,
+        input: Option<&[u8]>,
+    ) -> Result<Output> {
         let mut command = Command::new(program.as_ref());
         command
             .args(args)
             .env_clear()
-            .stdin(Stdio::null())
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -148,10 +165,23 @@ impl Node {
                 .stderr
                 .take()
                 .context("runtime stderr was not piped")?;
-            let (stdout, stderr, status) =
-                tokio::try_join!(bounded_output(stdout), bounded_output(stderr), async {
-                    child.wait().await.context("waiting for runtime command")
-                })?;
+            let stdin = child.stdin.take();
+            // A command that exits early reports its own failure; a closed
+            // pipe here only means it stopped reading.
+            let feed = async move {
+                if let (Some(mut stdin), Some(input)) = (stdin, input) {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stdin.write_all(input).await;
+                    let _ = stdin.shutdown().await;
+                }
+                Ok::<_, anyhow::Error>(())
+            };
+            let (stdout, stderr, status, ()) = tokio::try_join!(
+                bounded_output(stdout),
+                bounded_output(stderr),
+                async { child.wait().await.context("waiting for runtime command") },
+                feed
+            )?;
             Ok(Output {
                 status,
                 stdout,
@@ -186,6 +216,24 @@ impl Node {
         Ok(output)
     }
 
+    /// Execute a checked node command whose private input arrives on stdin.
+    ///
+    /// # Errors
+    /// Reports transport, timeout, or command exit failures.
+    pub async fn node_with_input(&self, args: &[OsString], input: &[u8]) -> Result<Output> {
+        let output = self
+            .raw_node_inner(args, NODE_COMMAND_TIMEOUT, Some(input))
+            .await?;
+        if !output.status.success() {
+            bail!(
+                "runtime node command failed with {}: {}",
+                output.status,
+                bounded_diagnostic(&output.stderr)
+            );
+        }
+        Ok(output)
+    }
+
     /// Execute a node command, retaining nonzero status for explicit interpretation.
     ///
     /// # Errors
@@ -195,6 +243,15 @@ impl Node {
     }
 
     async fn raw_node_with_timeout(&self, args: &[OsString], timeout: Duration) -> Result<Output> {
+        self.raw_node_inner(args, timeout, None).await
+    }
+
+    async fn raw_node_inner(
+        &self,
+        args: &[OsString],
+        timeout: Duration,
+        input: Option<&[u8]>,
+    ) -> Result<Output> {
         if timeout.as_secs() == 0 {
             bail!("node operation timeout must be at least one second");
         }
@@ -203,10 +260,12 @@ impl Node {
             .context("node operation timeout overflows")?;
         #[cfg(test)]
         if let Some(runner) = &self.test_runner {
-            return self.raw_command(runner, args, transport_timeout).await;
+            return self
+                .raw_command_with_input(runner, args, transport_timeout, input)
+                .await;
         }
         let (program, arguments) = self.node_invocation(args, timeout);
-        self.raw_command(program, &arguments, transport_timeout)
+        self.raw_command_with_input(program, &arguments, transport_timeout, input)
             .await
     }
 
@@ -378,6 +437,56 @@ mod tests {
             .await
             .expect_err("zero timeout");
         assert!(error.to_string().contains("at least one second"));
+    }
+
+    #[tokio::test]
+    async fn provider_snapshots_reach_the_broker_only_on_stdin() {
+        use std::os::unix::fs::PermissionsExt;
+        let files = tempfile::tempdir().expect("fixture directory");
+        let runner = files.path().join("node.sh");
+        let arguments = files.path().join("arguments");
+        // Stand in for `kata-network credentials`: consume stdin and answer
+        // with the nonce from the arguments and workload material.
+        std::fs::write(
+            &runner,
+            format!(
+                "#!/bin/sh\nprintf '%s ' \"$@\" > '{}'\nwc -c > /dev/null\nwhile [ \"$1\" != --nonce ]; do shift; done\nprintf '{{\"nonce\":\"%s\",\"material\":{{\"sandbox_id\":\"sandbox-a\",\"provider_env_revision\":1,\"environment\":{{\"TOKEN\":\"openshell:resolve:env:TOKEN\"}}}}}}' \"$2\"\n",
+                arguments.display()
+            ),
+        )
+        .expect("runner");
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o700)).expect("mode");
+        let node = Node::with_transport("native", NodeTransport::LinuxLocal)
+            .expect("node")
+            .test_runner(runner);
+        let material = crate::runtime::network::install_credentials(
+            &node,
+            std::path::Path::new("/opt/openshell-kata/kata-runtime"),
+            "sandbox-a",
+            b"REAL-CREDENTIAL-BYTES",
+            "nonce-0123456789abcdef",
+        )
+        .await
+        .expect("credentials installed");
+        assert_eq!(
+            material["environment"]["TOKEN"],
+            "openshell:resolve:env:TOKEN"
+        );
+        let arguments = std::fs::read_to_string(arguments).expect("arguments");
+        assert!(arguments.contains("credentials --control"));
+        assert!(!arguments.contains("REAL-CREDENTIAL"));
+        assert!(
+            crate::runtime::network::install_credentials(
+                &node,
+                std::path::Path::new("/opt/openshell-kata/kata-runtime"),
+                "sandbox-b",
+                b"REAL-CREDENTIAL-BYTES",
+                "nonce-0123456789abcdef",
+            )
+            .await
+            .is_err(),
+            "material for another sandbox is refused"
+        );
     }
 
     #[test]

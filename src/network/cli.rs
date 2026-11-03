@@ -1,8 +1,10 @@
 use super::{
-    BrokerHandle, FenceProof, FenceSpec, NetworkPolicy, bind_broker, install_fence, remove_fence,
-    verify_fence,
+    BrokerHandle, FenceProof, FenceSpec, NetworkPolicy, bind_broker, install_fence,
+    mediation::{self, GuestMaterial, Mediation},
+    remove_fence, verify_fence,
 };
 use anyhow::{Context, Result, bail};
+use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -65,6 +67,33 @@ enum Command {
         policy: PathBuf,
         #[arg(long)]
         control: PathBuf,
+        /// Sandbox whose provider credentials this broker may hold.
+        #[arg(long, requires = "guest_ip")]
+        sandbox_id: Option<String>,
+        /// The only peer address admitted to inspected destinations.
+        #[arg(long, requires = "sandbox_id")]
+        guest_ip: Option<std::net::IpAddr>,
+    },
+    /// Install a provider snapshot read from stdin into a running broker.
+    Credentials {
+        #[arg(long)]
+        control: PathBuf,
+        #[arg(long)]
+        sandbox_id: String,
+        #[arg(long)]
+        nonce: String,
+    },
+    /// Generate a sandbox proxy CA into a private node directory.
+    CaGenerate {
+        #[arg(long)]
+        directory: PathBuf,
+    },
+    /// Install the public proxy CA into a mounted, not yet booted guest root.
+    GuestTrust {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        certificate: PathBuf,
     },
     Install {
         #[arg(long)]
@@ -103,6 +132,17 @@ enum Command {
         nonce: String,
     },
 }
+/// Base64 protobuf provider snapshot; it carries credentials, so it is never
+/// formatted.
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+struct Snapshot(String);
+impl std::fmt::Debug for Snapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Snapshot([REDACTED])")
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum ControlRequest {
@@ -116,11 +156,19 @@ enum ControlRequest {
     Stop {
         nonce: String,
     },
+    Credentials {
+        nonce: String,
+        sandbox_id: String,
+        snapshot: Snapshot,
+    },
 }
 impl ControlRequest {
     fn nonce(&self) -> &str {
         match self {
-            Self::Update { nonce, .. } | Self::Inspect { nonce } | Self::Stop { nonce } => nonce,
+            Self::Update { nonce, .. }
+            | Self::Inspect { nonce }
+            | Self::Stop { nonce }
+            | Self::Credentials { nonce, .. } => nonce,
         }
     }
 }
@@ -132,7 +180,12 @@ struct ControlResponse {
     stopping: bool,
     #[serde(default)]
     active_connections: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    material: Option<GuestMaterial>,
 }
+
+/// Control requests carry at most one bounded provider snapshot.
+const MAX_CONTROL_REQUEST: usize = 2 * mediation::MAX_SNAPSHOT_BYTES;
 
 async fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     let file = tokio::fs::File::open(path).await?;
@@ -176,13 +229,18 @@ async fn control_connection(stream: UnixStream, broker: &BrokerHandle) -> Result
     let mut bytes = Vec::new();
     tokio::time::timeout(
         Duration::from_secs(10),
-        (&mut reader).take(65537).read_until(b'\n', &mut bytes),
+        (&mut reader)
+            .take(MAX_CONTROL_REQUEST as u64 + 1)
+            .read_until(b'\n', &mut bytes),
     )
     .await??;
-    if bytes.len() > 65536 {
+    if bytes.len() > MAX_CONTROL_REQUEST {
         bail!("oversized broker control request");
     }
-    let request: ControlRequest = serde_json::from_slice(&bytes)?;
+    // Parse errors could quote a credential; report none of the input.
+    let request: ControlRequest =
+        serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("invalid control request"))?;
+    drop(bytes);
     if !nonce_valid(request.nonce()) {
         bail!("invalid broker request nonce");
     }
@@ -193,6 +251,25 @@ async fn control_connection(stream: UnixStream, broker: &BrokerHandle) -> Result
     if let ControlRequest::Update { policy, .. } = &request {
         broker.replace_policy(policy.clone()).await?;
     }
+    let material = match &request {
+        ControlRequest::Credentials {
+            sandbox_id,
+            snapshot,
+            ..
+        } => {
+            let mediation = broker
+                .mediation()
+                .context("broker has no provider mediation")?;
+            if mediation.sandbox_id() != sandbox_id {
+                bail!("provider snapshot names another sandbox");
+            }
+            let snapshot = base64::engine::general_purpose::STANDARD
+                .decode(&snapshot.0)
+                .map_err(|_| anyhow::anyhow!("invalid provider snapshot encoding"))?;
+            Some(mediation.install(&snapshot))
+        }
+        _ => None,
+    };
     let (generation, policy) = broker.snapshot().await?;
     let response = ControlResponse {
         nonce: request.nonce().into(),
@@ -200,6 +277,7 @@ async fn control_connection(stream: UnixStream, broker: &BrokerHandle) -> Result
         policy,
         stopping,
         active_connections: broker.active_connections().await,
+        material,
     };
     let mut bytes = serde_json::to_vec(&response)?;
     bytes.push(b'\n');
@@ -214,7 +292,12 @@ impl Drop for SocketFile {
         let _ = std::fs::remove_file(&self.0);
     }
 }
-async fn run_broker(address: SocketAddr, policy_path: &Path, control: &Path) -> Result<()> {
+async fn run_broker(
+    address: SocketAddr,
+    policy_path: &Path,
+    control: &Path,
+    binding: Option<(String, std::net::IpAddr)>,
+) -> Result<()> {
     let parent = control
         .parent()
         .context("broker control directory required")?;
@@ -230,7 +313,17 @@ async fn run_broker(address: SocketAddr, policy_path: &Path, control: &Path) -> 
     let listener = UnixListener::bind(control).context("binding private broker control socket")?;
     std::fs::set_permissions(control, std::fs::Permissions::from_mode(0o600))?;
     let _socket = SocketFile(control.into());
-    let broker = bind_broker(address, read_json(policy_path).await?).await?;
+    let mediation = binding
+        .map(|(sandbox_id, guest_ip)| {
+            let credentials = std::env::var_os("CREDENTIALS_DIRECTORY").map(PathBuf::from);
+            Mediation::new(
+                sandbox_id,
+                guest_ip,
+                Mediation::load_ca(credentials.as_deref())?,
+            )
+        })
+        .transpose()?;
+    let broker = bind_broker(address, read_json(policy_path).await?, mediation).await?;
     let (generation, policy) = broker.snapshot().await?;
     println!(
         "{}",
@@ -276,7 +369,56 @@ pub async fn run_network(cli: NetworkCli) -> Result<()> {
             bind,
             policy,
             control,
-        } => run_broker(bind, &policy, &control).await,
+            sandbox_id,
+            guest_ip,
+        } => run_broker(bind, &policy, &control, sandbox_id.zip(guest_ip)).await,
+        Command::Credentials {
+            control,
+            sandbox_id,
+            nonce,
+        } => {
+            if !nonce_valid(&nonce) {
+                bail!("invalid broker request nonce");
+            }
+            let mut snapshot = Vec::new();
+            tokio::io::stdin()
+                .take(mediation::MAX_SNAPSHOT_BYTES as u64 + 1)
+                .read_to_end(&mut snapshot)
+                .await?;
+            if snapshot.len() > mediation::MAX_SNAPSHOT_BYTES {
+                bail!("provider snapshot exceeds its size limit");
+            }
+            let snapshot = Snapshot(base64::engine::general_purpose::STANDARD.encode(&snapshot));
+            let result = request_control(
+                &control,
+                ControlRequest::Credentials {
+                    nonce,
+                    sandbox_id: sandbox_id.clone(),
+                    snapshot,
+                },
+            )
+            .await?;
+            let material = result
+                .material
+                .as_ref()
+                .context("broker returned no provider material")?;
+            if material.sandbox_id != sandbox_id {
+                bail!("broker returned material for another sandbox");
+            }
+            println!("{}", serde_json::to_string(&result)?);
+            Ok(())
+        }
+        Command::CaGenerate { directory } => {
+            let certificate = mediation::generate_ca(&directory)?;
+            println!("{}", serde_json::json!({ "certificate": certificate }));
+            Ok(())
+        }
+        Command::GuestTrust { root, certificate } => {
+            let certificate = std::fs::read_to_string(certificate)?;
+            mediation::install_guest_trust(&root, &certificate)?;
+            println!("{{\"installed\":true}}");
+            Ok(())
+        }
         Command::Install { spec } => {
             let proof = install_fence(read_json::<FenceSpec>(&spec).await?).await?;
             println!("{}", serde_json::to_string(&proof)?);
@@ -331,5 +473,21 @@ pub async fn run_network(cli: NetworkCli) -> Result<()> {
             println!("{}", serde_json::to_string(&result)?);
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credential_control_requests_never_format_snapshots() {
+        let request = ControlRequest::Credentials {
+            nonce: "nonce-0123456789abcdef".into(),
+            sandbox_id: "sandbox".into(),
+            snapshot: Snapshot("c2stYW50LXNlY3JldA==".into()),
+        };
+        let rendered = format!("{request:?}");
+        assert!(rendered.contains("[REDACTED]") && !rendered.contains("c2stYW50"));
     }
 }

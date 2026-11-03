@@ -103,6 +103,22 @@ async fn main() -> Result<()> {
             .or_else(|| std::env::var("OPENSHELL_KATA_GUEST_IMAGE").ok()),
         max_sandboxes: args.max_sandboxes,
     };
+    if args.action == "credentials" {
+        // The provider snapshot carries credentials: it arrives only on stdin
+        // and the output holds placeholders and the public CA.
+        use std::io::Read as _;
+        let limit = openshell_kata::network::mediation::MAX_SNAPSHOT_BYTES;
+        let mut snapshot = Vec::new();
+        std::io::stdin()
+            .take(limit as u64 + 1)
+            .read_to_end(&mut snapshot)?;
+        if snapshot.len() > limit {
+            bail!("provider snapshot exceeds its size limit");
+        }
+        let value = lifecycle::install_credentials(&settings, &args.id, &snapshot).await?;
+        println!("{}", serde_json::to_string(&value)?);
+        return Ok(());
+    }
     let action: Action = args.action.parse().context("invalid runtime action")?;
     let value = lifecycle::execute(
         &settings,

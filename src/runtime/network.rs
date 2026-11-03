@@ -407,6 +407,99 @@ pub async fn install(node: &Node, runtime_binary: &Path, id: &str, spec: &FenceS
     Ok(())
 }
 
+/// Root-only node directory holding this sandbox's proxy CA.
+pub fn ca_directory(id: &str) -> String {
+    format!("{}/tls", job_directory(id))
+}
+
+/// Generate the sandbox proxy CA on the node; its key never leaves the node.
+pub async fn generate_proxy_ca(node: &Node, runtime_binary: &Path, id: &str) -> Result<()> {
+    node.node(&args(&[
+        network_binary(runtime_binary)
+            .to_str()
+            .context("invalid network binary path")?,
+        "ca-generate",
+        "--directory",
+        &ca_directory(id),
+    ]))
+    .await?;
+    Ok(())
+}
+
+/// Install the public proxy CA into a mounted guest root before first boot.
+pub async fn install_guest_trust(
+    node: &Node,
+    runtime_binary: &Path,
+    id: &str,
+    root: &str,
+) -> Result<()> {
+    node.node(&args(&[
+        network_binary(runtime_binary)
+            .to_str()
+            .context("invalid network binary path")?,
+        "guest-trust",
+        "--root",
+        root,
+        "--certificate",
+        &format!(
+            "{}/{}.pem",
+            ca_directory(id),
+            crate::network::mediation::CA_CERT_CREDENTIAL
+        ),
+    ]))
+    .await?;
+    Ok(())
+}
+
+/// Remove the sandbox proxy CA after its broker and guest are gone.
+pub async fn remove_proxy_ca(node: &Node, id: &str) -> Result<()> {
+    node.node(&args(&["rm", "-rf", "--", &ca_directory(id)]))
+        .await?;
+    Ok(())
+}
+
+/// Send one provider snapshot to the running broker over private stdin.
+pub async fn install_credentials(
+    node: &Node,
+    runtime_binary: &Path,
+    id: &str,
+    snapshot: &[u8],
+    nonce: &str,
+) -> Result<Value> {
+    let output = node
+        .node_with_input(
+            &args(&[
+                network_binary(runtime_binary)
+                    .to_str()
+                    .context("invalid network binary path")?,
+                "credentials",
+                "--control",
+                &control_path(id),
+                "--sandbox-id",
+                id,
+                "--nonce",
+                nonce,
+            ]),
+            snapshot,
+        )
+        .await?;
+    let response: Value =
+        serde_json::from_slice(&output.stdout).context("decoding broker credential response")?;
+    if response["nonce"] != nonce {
+        bail!("broker credential response nonce mismatch");
+    }
+    let material = response
+        .get("material")
+        .cloned()
+        .context("broker returned no provider material")?;
+    let parsed: crate::network::mediation::GuestMaterial =
+        serde_json::from_value(material.clone())?;
+    if parsed.sandbox_id != id {
+        bail!("broker returned material for another sandbox");
+    }
+    Ok(material)
+}
+
 /// Launch the broker without root identity or networking capabilities.
 pub async fn start_broker(
     node: &Node,
@@ -420,7 +513,27 @@ pub async fn start_broker(
     put_json(node, &policy.network, &policy_path).await?;
     let unit = broker_unit(id);
     let binary = network_binary(runtime_binary);
-    node.node(&args(&[
+    // systemd hands the root-only CA to the unprivileged broker as private
+    // credentials; guests created before CA support run without inspection.
+    let ca = ca_directory(id);
+    let key = format!("{ca}/{}.pem", crate::network::mediation::CA_KEY_CREDENTIAL);
+    let certificate = format!("{ca}/{}.pem", crate::network::mediation::CA_CERT_CREDENTIAL);
+    let credentials = if exists(node, &key).await? {
+        vec![
+            format!(
+                "--property=LoadCredential={}:{key}",
+                crate::network::mediation::CA_KEY_CREDENTIAL
+            ),
+            format!(
+                "--property=LoadCredential={}:{certificate}",
+                crate::network::mediation::CA_CERT_CREDENTIAL
+            ),
+        ]
+    } else {
+        Vec::new()
+    };
+    let guest_ip = spec.guest_ip.to_string();
+    let mut command = args(&[
         "systemd-run",
         "--quiet",
         "--collect",
@@ -433,6 +546,9 @@ pub async fn start_broker(
         "--property=CapabilityBoundingSet=",
         "--property=ProtectSystem=strict",
         "--property=ProtectHome=yes",
+    ]);
+    command.extend(credentials.into_iter().map(OsString::from));
+    command.extend(args(&[
         binary.to_str().context("invalid broker path")?,
         "broker",
         "--bind",
@@ -441,8 +557,12 @@ pub async fn start_broker(
         &policy_path,
         "--control",
         &control_path(id),
-    ]))
-    .await?;
+        "--sandbox-id",
+        id,
+        "--guest-ip",
+        &guest_ip,
+    ]));
+    node.node(&command).await?;
     Ok(())
 }
 

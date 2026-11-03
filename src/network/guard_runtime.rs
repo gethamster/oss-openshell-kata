@@ -481,6 +481,7 @@ async fn bind_hosted_with_connector(
             guard: guard.clone(),
             inner,
         }),
+        None,
     )
     .await?;
     let stop_watch = CancellationToken::new();

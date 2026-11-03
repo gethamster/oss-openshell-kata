@@ -21,8 +21,8 @@ process output, and guest-provided labels are not identity proofs. Reuse of an
 IP or sandbox name must not authorize a retired generation.
 
 The OpenShell supervisor-facing SSH host key, gateway JWTs, guest SSH client
-private key, provider credentials, and policy authority remain outside the
-guest. The separate guest SSH server has a guest-local host key; that key proves
+private key, provider credentials, the per-sandbox proxy CA private key, and
+policy authority remain outside the guest. The separate guest SSH server has a guest-local host key; that key proves
 the pinned guest transport, not gateway authorization. Compromise of that guest
 key must not authorize another sandbox or the OpenShell gateway.
 
@@ -31,8 +31,9 @@ key must not authorize another sandbox or the OpenShell gateway.
 Keep the upstream OpenShell wire API unchanged. Each hardened launch requires:
 
 1. An explicitly supplied native policy: `version: 1`, with no filesystem,
-   process, Landlock, middleware, credential, or narrow executable claims.
-   The supported native network subset is described below.
+   process, Landlock, middleware, or narrow executable claims, and no
+   credential mechanism other than gateway provider credentials injected by
+   the host broker. The supported native network subset is described below.
 2. A trusted operator VM policy selected by `--vm-policy /absolute/path.json`.
 
 The native policy is not silently rewritten. The adapter checks both the
@@ -115,8 +116,9 @@ names and globally routable IP literals are supported. DNS case and a terminal
 dot are normalized; duplicate normalized endpoints collapse into one rule.
 The external broker resolves names and rejects non-global or mixed
 public/private results at connection time. Version 1 does not allow private
-destinations, provider credential injection, TLS interception, HTTP path
-restrictions, or arbitrary UDP.
+destinations, HTTP path restrictions, or arbitrary UDP. The operator ceiling
+lists TCP destinations only; TLS inspection is compiled from native intent
+(below) and never authored in the operator policy.
 
 ### Native network policy can only narrow the operator ceiling
 
@@ -145,10 +147,11 @@ The runtime rejects audit mode. A single
 port or a list of ports is supported; conflicting simultaneous forms are
 rejected. Every resulting host/port must exist in the operator ceiling.
 
-Other endpoint features are rejected, including L7 rules, credentialed-provider markers,
-credential binding/signing/rewriting, private-IP overrides, and inspection
-configuration. The gateway's well-formed opaque `token_grant_owner` provenance
-is accepted on uncredentialed endpoints; it never enables credential access.
+Other endpoint features are rejected on these TCP endpoints, including L7
+rules, credentialed-provider markers, credential binding/signing/rewriting,
+private-IP overrides, and inspection configuration. The gateway's well-formed
+opaque `token_grant_owner` provenance is accepted; it never enables credential
+access. Credentialed destinations use the inspected REST shape below.
 This is whole-sandbox permission, with no assertion about which
 guest binary opened a connection. It does not weaken a narrow binary rule into
 an all-binary rule.
@@ -157,6 +160,105 @@ These rules authorize TCP transport to an address selected by the hostname.
 The broker does not authenticate TLS SNI or the virtual HTTP service at a shared
 public IP. TLS remains end-to-end between the guest and upstream, and guest
 certificate verification is not a substitute for broker L7 enforcement.
+
+### Provider credentials are injected by the host broker
+
+Attached OpenShell providers (for example a member's `claude-subscription`, or
+`github-user`/`github-repo` tokens) are supported only through host-side
+injection. The real credential never enters the guest; the guest holds
+OpenShell placeholders (`openshell:resolve:env:...`), exactly as a native
+sandbox child does. A credentialed destination must be requested as inspected
+L7 REST in an all-executable rule:
+
+```yaml
+version: 1
+network_policies:
+  model_and_subscriptions:
+    binaries:
+      - path: "/**"
+    endpoints:
+      - host: api.anthropic.com
+        port: 443
+        protocol: rest
+        access: read-write      # read-only | read-write | full
+        enforcement: enforce
+      - host: github.com
+        port: 443
+        protocol: rest
+        access: read-write
+        enforcement: enforce
+      - host: api.github.com
+        port: 443
+        protocol: rest
+        access: read-write
+        enforcement: enforce
+      - host: chatgpt.com       # uncredentialed: unchanged opaque TCP
+        port: 443
+        tls: skip
+```
+
+Omit `tls` (OpenShell's default selects inspection); `tls: skip`, audit mode,
+explicit `rules`/`deny_rules`, `path`, credential binding/signing, body or
+WebSocket rewriting, `allow_uninspected_credentials`, private-IP overrides, and
+IP-literal hosts are rejected. The gateway stamps `provider_credentialed` on
+endpoints its attached providers bind, and requires a stamped endpoint to be
+inspected; a stamped TCP endpoint is rejected here as well. One host/port is
+either opaque or inspected, never both; matching REST rules union their
+presets. Each destination must also exist in the operator `tcp_allow` ceiling.
+
+The gateway also composes one reserved `_provider_<name>` rule per attached
+provider from its profile, naming the profile's executables and L7 rules. A VM
+cannot attest guest executables, so these rules grant nothing here: the
+sandbox's own all-executable rule must authorize every destination. Dropping a
+grant only narrows access. A user-authored narrow executable rule is still
+rejected. Access is whole-sandbox: any guest process may use a credential at
+its bound endpoints, with no claim about which executable sent a request.
+
+The host broker enforces the following for an inspected destination:
+
+- **TLS terminates on the host.** At creation the node generates a per-sandbox
+  CA (`kata-network ca-generate`) in a root-only directory
+  (`/var/lib/openshell-kata/jobs/<id>/tls`, key mode 0600). Its private key is
+  delivered to the unprivileged broker only as a systemd credential and is
+  removed with the sandbox. The public certificate, plus a bundle of the image's
+  system roots and that certificate, is written beneath the mounted pristine
+  operator image before first boot at `/etc/openshell-tls/openshell-ca.pem` and
+  `/etc/openshell-tls/ca-bundle.pem`, without following links out of the guest
+  root. Commands started by the adapter receive the native supervisor's trust
+  variables (`NODE_EXTRA_CA_CERTS`, `DENO_CERT`, `SSL_CERT_FILE`,
+  `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`). Sandboxes created
+  before this support have no CA; their inspected destinations are refused.
+- **Only the fenced guest is served.** Inspection requires `CONNECT` from the
+  guest's own address; plain-HTTP forwarding and other peers are refused.
+- **One request per tunnel, with OpenShell L7 handling.** The broker requires an
+  origin-form HTTP/1.x request whose `Host` names the tunnel destination,
+  rejects upgrades, HTTP/2, ambiguous framing and smuggling forms, applies the
+  REST access preset (read-only: GET/HEAD/OPTIONS; read-write adds
+  POST/PUT/PATCH; full admits all), and forwards with `Connection: close`.
+- **OpenShell substitutes credentials.** Placeholders in the request line and
+  headers (including Basic authorization) are resolved by OpenShell's
+  `ProviderCredentialState` and `rewrite_http_header_block`, only for
+  credentials whose gateway static binding covers the destination host, port,
+  and path. An unresolvable or out-of-scope placeholder fails the request
+  before anything is sent upstream.
+- **Verified TLS upstream.** The broker originates TLS to the real host and
+  verifies it against public roots plus the node's system bundle.
+
+The adapter obtains credentials as a native supervisor does: it calls
+`GetSandboxProviderEnvironment` with the sandbox's own renewed supervisor
+JWT, declaring static endpoint bindings and stable placeholders, and requires
+the snapshot to match the effective configuration's provider revision,
+attachment epoch, and policy hash (re-reading both if a refresh lands between
+them). A changed snapshot, including a gateway-refreshed `github-user` token,
+is written to the lifecycle helper's stdin, then to `kata-network credentials`
+on the node, then over the broker's root-only control socket. It is never in
+arguments, files, the environment, or logs; the broker replies with
+placeholders and the public certificate only. Gateway-withheld material,
+dynamic token grants, provider-managed files, unbound credentials, and invalid
+snapshots revoke every installed credential and are reported without values.
+Stop and delete stop the broker, which holds credentials only in memory;
+broker revocation and process exit discard them. OpenShell's retention of
+recent placeholder generations within one provider identity applies unchanged.
 
 ## Runtime interface
 
@@ -272,8 +374,10 @@ for the authorized control path. The broker owns upstream DNS and TCP dialing,
 checks the exact allowlist, and applies connection and byte limits. Require
 unambiguous parsing of CONNECT authorities and absolute-form HTTP requests;
 reject conflicting authorities, userinfo, unsupported framing, and invalid
-ports. Validate the chosen IP after DNS resolution. Raw TCP and TLS remain
-opaque; do not claim per-request or TLS-content enforcement.
+ports. Validate the chosen IP after DNS resolution. Raw TCP and TLS to
+`tls: skip` destinations remain opaque; do not claim per-request or TLS-content
+enforcement there. Inspected REST destinations follow the provider credential
+section above.
 
 Changed broker policy revokes and drains the old generation's connections before
 publishing the new rules. Reapplying identical policy keeps existing streams.
@@ -301,6 +405,10 @@ prototype's CLI flows are not a substitute for these scenarios:
   container, and detached application. Observe denial from outside the guest.
 - Demonstrate one allowed broker connection and one denied hostname/port, reject
   private/mixed DNS answers and authority confusion, and revoke a live stream.
+- With a provider attached, show the guest environment and files hold only
+  placeholders and the public CA, an inspected request reaches the upstream
+  with the real credential, and the request fails after the provider is
+  detached, at an unbound host, from another peer, and after stop.
 - Try archive traversal, symlink swaps, hard links, special files, oversized
   transfers, and another sandbox's store ID. Verify host canaries are unchanged.
 - Exhaust guest memory and every writable filesystem, and outlive the deadline.

@@ -48,7 +48,7 @@ control plane or a hypervisor escape.
 | Process UID, capabilities, and syscalls | The native backend qualifies a non-root, capability-free workload | Record the actual entrypoint identity; do not claim that it restricts Docker-created workloads or a compromised guest kernel. |
 | Network executable identity | Native mediation can authorize measured workload executables | Authorize the entire sandbox at the external boundary. Reject narrower guest-executable requirements. |
 | Resource limits | Depend on the selected runtime | Enforce CPU, memory, lifetime, and storage at the VM/host boundary. Do not advertise a guest process-count guarantee based on host process counts. |
-| Provider credentials | Native supervisors keep provider material outside workloads | Keep real credentials outside the guest; implement and test any supported injection path before accepting that provider configuration. |
+| Provider credentials | Native supervisors keep provider material outside workloads | Real credentials stay on the host. The host broker terminates guest TLS for inspected REST destinations with a per-sandbox CA and substitutes OpenShell placeholders using OpenShell's endpoint-bound resolver; the guest receives placeholders and the public CA only. Other injection forms are rejected. |
 | Preview ingress | Gateway routes authorized services | Expose only explicit gateway previews; never create direct application ingress to workload Pods. |
 
 ## Native and VM policy representation
@@ -70,11 +70,15 @@ an additional layer introduces unsupported claims.
 
 The VM policy does not reinterpret native fields. It declares host filesystem
 and VM resource boundaries and whole-sandbox network access. Native network
-rules must select all executables with `/**`, use only L4 TCP with explicit
-`tls: skip`, and request destinations within the operator `tcp_allow` ceiling.
-Empty native network rules compile to deny-all even when that ceiling is
-nonempty. Narrow executable rules, audit mode, L7, credential fields, and other
-unsupported endpoint options are rejected. No invented binary identity is sent
+rules must select all executables with `/**` and request destinations within
+the operator `tcp_allow` ceiling. An endpoint is either L4 TCP with explicit
+`tls: skip`, or, for provider credentials, enforced L7 REST with an access
+preset and default TLS handling, which the host broker inspects. Empty native
+network rules compile to deny-all even when that ceiling is nonempty.
+Gateway-composed `_provider_*` rules name profile executables a VM cannot
+attest, so they grant nothing. Narrow executable rules, audit mode, other L7
+features, credential fields, and other unsupported endpoint options are
+rejected. See the contract's provider credential section for the exact shape. No invented binary identity is sent
 to the stock supervisor. This keeps the unmodified OpenShell gateway while
 making the coarser VM policy explicit to its operator.
 
@@ -133,9 +137,13 @@ as a validated file export.
 Keep gateway tokens, SSH private keys, provider material, and cloud credentials
 out of guest mounts, environment, logs, images, and upload archives. Any
 guest-facing authentication capability must be scoped to that sandbox and
-generation and must not authorize a different sandbox. Provider support starts
-disabled. Add it only after an external broker can authorize the destination and
-operation before credential injection and can revoke that access reliably.
+generation and must not authorize a different sandbox. Provider credentials
+are injected only by the external broker, which authorizes the destination
+and REST operation before resolving a placeholder and revokes installed
+material on withheld or invalid snapshots, stop, and delete. The adapter
+fetches them with the sandbox's own supervisor JWT and passes snapshots to the
+broker only over stdin and its root-only control socket. The per-sandbox proxy
+CA key stays in a root-only node directory and the broker's memory.
 
 ## Network enforcement outside the guest
 
@@ -152,12 +160,14 @@ require explicit operator-authorized destinations. Prevent DNS rebinding and
 cross-sandbox relay reuse. DNS itself is an egress channel and must not offer
 unrestricted external recursion from the guest.
 
-The supported profile has no provider credentials, middleware, wildcard
-destinations, or guest UDP/DNS. The external broker resolves exact hostname/port
-selectors to public IPs and rejects non-global and mixed DNS results. Direct
-traffic remains blocked. The TCP proxy does not enforce TLS SNI or virtual-host
-identity on a shared public address. TLS inspection, HTTP method/path
-restrictions, credential rewriting, and generic UDP remain unsupported.
+The supported profile has no middleware, wildcard destinations, or guest
+UDP/DNS. The external broker resolves exact hostname/port selectors to public
+IPs and rejects non-global and mixed DNS results. Direct traffic remains
+blocked. The TCP proxy does not enforce TLS SNI or virtual-host identity on a
+shared public address for `tls: skip` destinations. TLS inspection, REST
+access presets, and header/request-line credential substitution apply only to
+inspected destinations; explicit method/path rules, body credential rewriting,
+WebSocket and HTTP/2 inspection, and generic UDP remain unsupported.
 
 Apply policy revisions atomically. Revoke or terminate existing connections
 when a new policy removes their authorization. Losing policy/control service
@@ -199,9 +209,13 @@ Do not expose arbitrary host devices, KVM handles, or runtime sockets to callers
    explicit previews together. The profile blocks guest UDP/DNS; clients use the
    broker for hostname-bearing requests. Validate every accepted effective-policy
    and operator-profile field before claiming hardened support.
-6. **Add optional features independently.** Credential injection, L7 controls,
-   middleware, resource extensions, and platform launchers each need positive and
-   adversarial tests. Unimplemented features remain rejected.
+6. **Add optional features independently.** Credential injection through the
+   host broker is implemented with unit and broker-level tests (placeholder
+   substitution against a local TLS upstream, endpoint scoping, revocation,
+   peer binding, CA isolation, and no secret in guest files or logs); it needs
+   qualification on each deployed node. Explicit L7 rules, middleware, resource
+   extensions, and platform launchers each need positive and adversarial tests.
+   Unimplemented features remain rejected.
 
 The supported local profile is implemented and qualified as recorded in the
 evidence. The broader adversarial matrix below remains a production gate:
