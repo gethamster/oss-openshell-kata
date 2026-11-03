@@ -561,8 +561,11 @@ async fn start(
             model::ResourceProfile::Local => Duration::from_secs(90),
             _ => Duration::from_secs(300),
         };
+        // No host process reads a detached task's stdio. Without --null-io the
+        // guest's stdout/stderr pipe fills and every writer (sshd logs each
+        // connection) blocks forever, so guest SSH stops answering.
         node.node_with_timeout(
-            &args(&["ctr", "tasks", "start", "--detach", id]),
+            &args(&["ctr", "tasks", "start", "--null-io", "--detach", id]),
             boot_timeout,
         )
         .await?;
