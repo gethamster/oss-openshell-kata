@@ -31,4 +31,5 @@ else
 fi
 # The only Docker API listener is a Unix socket inside this guest.
 dockerd --host=unix:///var/run/docker.sock --group=sandbox --storage-driver=overlay2 > /var/log/docker.log 2>&1 &
-exec /usr/sbin/sshd -D -e -f /etc/ssh/openshell-kata.conf
+# Log to a guest file: the task runs with null stdio on the host.
+exec /usr/sbin/sshd -D -E /var/log/sshd.log -f /etc/ssh/openshell-kata.conf
