@@ -414,7 +414,7 @@ fn native_fingerprint(config: &Config) -> Result<String> {
     binding["version"] = serde_json::json!(BINDING);
     Ok(format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(&binding)?)
+        Sha256::digest(crate::canonical::to_vec(&binding)?)
     ))
 }
 
@@ -425,7 +425,7 @@ fn legacy_native_fingerprint(config: &Config) -> Result<String> {
     let binding = serde_json::json!({"version":1,"profile":"native-enforced","policy_sha256":policy_sha256,"guest_image":config.guest_image,"gateway":identity["gateway"],"gateway_ca_sha256":identity["gateway_ca_sha256"],"lifecycle":identity["lifecycle"],"lifecycle_arg":identity["lifecycle_arg"],"ssh":identity["ssh"],"environment":identity["environment"]});
     Ok(format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(&binding)?)
+        Sha256::digest(crate::canonical::to_vec(&binding)?)
     ))
 }
 

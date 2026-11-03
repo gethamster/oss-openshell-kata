@@ -293,7 +293,10 @@ pub(super) fn now() -> Result<u64> {
         .as_secs())
 }
 pub(super) fn digest(value: &impl Serialize) -> Result<String> {
-    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(crate::canonical::to_vec(value)?)
+    ))
 }
 pub(super) fn canonical_cidrs(values: &[String]) -> Result<Vec<String>> {
     ensure!(
