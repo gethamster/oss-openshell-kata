@@ -275,7 +275,7 @@ pub(super) fn validate(
         "namespace":state.namespace,"runtime_identity":identity,"runtime_class":manifest::runtime(state),
         "image":state.image,"network":"deny-all-egress","cpu":"2","memory":"4Gi",
         "expires_at_unix":expires,"deadline_enforcement":"kubelet-active-deadline",
-        "policy_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&observed.policies)?))});
+        "policy_sha256":format!("{:x}",Sha256::digest(crate::canonical::to_vec(&observed.policies)?))});
     Ok((
         State {
             host: host.to_owned(),

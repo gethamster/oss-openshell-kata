@@ -1,6 +1,7 @@
 //! External OpenShell compute adapter for isolated Kata guests.
 pub mod admission;
 pub mod boundary;
+pub mod canonical;
 pub mod config;
 pub mod download;
 pub mod driver;
