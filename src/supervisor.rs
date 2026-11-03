@@ -116,6 +116,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn readiness_reports_installed_only_when_material_is_held() {
+        assert_eq!(super::readiness_reason(0, false), 0);
+        assert_eq!(
+            super::readiness_reason(0, true),
+            o::ProviderReadinessReason::CredentialsWithheld as i32
+        );
+        let expired = o::ProviderReadinessReason::SupervisorLeaseExpired as i32;
+        assert_eq!(super::readiness_reason(expired, true), expired);
+    }
+
+    #[test]
     fn intentional_close_cannot_be_replaced_by_supervisor_error() {
         for current in [
             Phase::Closing,
@@ -203,6 +214,18 @@ pub fn validate_authentication(bytes: &[u8]) -> Result<()> {
     russh::keys::decode_secret_key(&auth.supervisor.ssh_host_private_key, None)
         .context("invalid gateway SSH host key")?;
     Ok(())
+}
+
+/// The readiness reason for a provider snapshot: the gateway's own reason when it
+/// withheld material, credentials withheld by the host broker, otherwise ready.
+fn readiness_reason(snapshot_reason: i32, withheld: bool) -> i32 {
+    if snapshot_reason != 0 {
+        snapshot_reason
+    } else if withheld {
+        o::ProviderReadinessReason::CredentialsWithheld as i32
+    } else {
+        0
+    }
 }
 
 /// One runtime generation; credentials never enter guest commands or logs.
@@ -515,6 +538,10 @@ impl Runtime {
             self.refresh_credential(&mut client).await?;
         }
         let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
+        // Provider readiness evidence belongs to the accepted session and renews
+        // its lease each heartbeat; sequences only increase within the session.
+        let mut session: Option<String> = None;
+        let mut readiness_sequence: u64 = 0;
         let mut refresh = credentials::refresh_timer();
         let mut verified_at = tokio::time::Instant::now();
         loop {
@@ -539,6 +566,15 @@ impl Runtime {
                                     self.enforce_snapshot(&effective,&mut applied).await?;
                                 }
                                 self.sync_providers(&providers, applied.as_ref()).await?;
+                                if let Some(session) = session.as_deref() {
+                                    readiness_sequence += 1;
+                                    if let Err(error) = self
+                                        .report_readiness(&mut client, session, readiness_sequence, &effective, &providers)
+                                        .await
+                                    {
+                                        tracing::warn!(sandbox=%self.id, error=%error, "provider readiness report failed");
+                                    }
+                                }
                                 if self.config.runtime_profile == RuntimeProfile::Kubernetes && self.hosted_network.is_none() {
                                         if effective.version!=last_snapshot.version || effective.config_revision!=last_snapshot.config_revision { bail!("effective policy changed; hosted runtime must be reprovisioned"); }
                                         let _validated = crate::policy::validate_policy(effective.policy.as_ref().context("effective hosted policy required")?)?;
@@ -565,7 +601,9 @@ impl Runtime {
                     bounded_send(&sender,o::SupervisorMessage {payload:Some(o::supervisor_message::Payload::Heartbeat(o::SupervisorHeartbeat {}))},&self.cancel).await?;
                 },
                 message = stream.message() => match message?.and_then(|m|m.payload) {
-                    Some(o::gateway_message::Payload::SessionAccepted(_)) => {
+                    Some(o::gateway_message::Payload::SessionAccepted(accepted)) => {
+                        session = Some(accepted.session_id);
+                        readiness_sequence = 0;
                         if self.vm_policy.is_some() { self.enforce_snapshot(&last_snapshot,&mut applied).await?; }
                         if self.config.runtime_profile == RuntimeProfile::Kubernetes { crate::guest::verify_runtime(&self.config,&self.spec,&self.instance).await?; }
                         self.phase.send_if_modified(|phase| { if *phase == Phase::Starting { *phase=Phase::Ready;true }else{false} });
@@ -719,6 +757,47 @@ impl Runtime {
             .map_err(|_| anyhow::anyhow!("provider material lock unavailable"))? =
             Some(Arc::new(material));
         *installed = Some(digest);
+        Ok(())
+    }
+    /// Report the installed provider state for this session. Credentials and the
+    /// launch environment count as installed only when the host broker holds the
+    /// snapshot's material; the gateway marks provider changes ready from this.
+    async fn report_readiness(
+        &self,
+        client: &mut o::open_shell_client::OpenShellClient<Channel>,
+        session: &str,
+        sequence: u64,
+        config: &s::GetSandboxConfigResponse,
+        providers: &o::GetSandboxProviderEnvironmentResponse,
+    ) -> Result<()> {
+        if !self.mediates_providers() {
+            return Ok(());
+        }
+        let withheld = self
+            .guest_material
+            .read()
+            .map_err(|_| anyhow::anyhow!("provider material lock unavailable"))?
+            .as_ref()
+            .is_some_and(|material| material.withheld.is_some());
+        let reason = readiness_reason(providers.readiness_reason, withheld);
+        client
+            .report_provider_readiness(self.request(o::ReportProviderReadinessRequest {
+                sandbox_id: self.id.to_string(),
+                observation: Some(o::ProviderReadinessObservation {
+                    session_id: session.to_owned(),
+                    sequence,
+                    attachment_epoch: providers.provider_attachment_epoch.clone(),
+                    provider_env_revision: providers.provider_env_revision,
+                    config_revision: config.config_revision,
+                    policy_hash: config.policy_hash.clone(),
+                    credentials_installed: reason == 0,
+                    policy_active: true,
+                    launch_environment_installed: reason == 0,
+                    process_instance_id: self.instance.clone(),
+                    reason,
+                }),
+            })?)
+            .await?;
         Ok(())
     }
     async fn report_accepted(
