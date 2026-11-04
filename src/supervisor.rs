@@ -540,7 +540,11 @@ impl Runtime {
         if self.is_enforced() {
             self.refresh_credential(&mut client).await?;
         }
-        let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
+        let mut heartbeat = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Provider readiness evidence belongs to the accepted session and renews
         // its lease each heartbeat; sequences only increase within the session.
         let mut session: Option<String> = None;
@@ -553,9 +557,8 @@ impl Runtime {
                 _ = refresh.tick(), if self.is_enforced() => { self.refresh_credential(&mut client).await?; },
                 _ = heartbeat.tick() => {
                     if self.vm_policy.is_some() || self.config.runtime_profile == RuntimeProfile::Kubernetes {
-                        tokio::select! {
-                            () = self.cancel.cancelled() => return Ok(()),
-                            result = tokio::time::timeout(REVALIDATION_DEADLINE, async {
+                        let last_verified = verified_at;
+                        let revalidation = tokio::time::timeout(REVALIDATION_DEADLINE, async {
                                 let mut request = self.request(s::GetSandboxConfigRequest { name:self.spec.name.clone(), ..Default::default() })?;
                                 request.set_timeout(Duration::from_secs(10));
                                 let effective = client.get_sandbox_config(request).await?.into_inner();
@@ -564,7 +567,7 @@ impl Runtime {
                                 // re-proven on a slower cadence to bound host load at fleet scale.
                                 let proven = self.operator_policy.is_none()
                                     || effective != last_snapshot
-                                    || verified_at.elapsed() >= NATIVE_REVALIDATION_INTERVAL;
+                                    || last_verified.elapsed() >= NATIVE_REVALIDATION_INTERVAL;
                                 if proven {
                                     self.enforce_snapshot(&effective,&mut applied).await?;
                                 }
@@ -588,7 +591,27 @@ impl Runtime {
                                     last_snapshot = effective;
                                 }
                                 Ok::<_,anyhow::Error>(proven)
-                            }) => {
+                            });
+                        tokio::pin!(revalidation);
+                        loop {
+                            tokio::select! {
+                                () = self.cancel.cancelled() => return Ok(()),
+                                message = stream.message() => match message?.and_then(|m| m.payload) {
+                                    Some(o::gateway_message::Payload::RelayOpen(open)) => {
+                                        let runtime = self.clone();
+                                        let sender = sender.clone();
+                                        let path = ssh_path.clone();
+                                        self.tasks.lock().await.push(tokio::spawn(async move {
+                                            if let Err(error) = runtime.relay(open, path, sender).await {
+                                                tracing::warn!(sandbox=%runtime.id, error=%error, "relay failed");
+                                            }
+                                        }));
+                                    }
+                                    Some(o::gateway_message::Payload::SessionRejected(_)) => bail!("gateway rejected supervisor session"),
+                                    None => bail!("gateway closed supervisor session"),
+                                    _ => {}
+                                },
+                                result = &mut revalidation => {
                                 match result.context("runtime revalidation deadline exceeded").and_then(|outcome| outcome) {
                                     Ok(true) => verified_at = tokio::time::Instant::now(),
                                     Ok(false) => {}
@@ -598,7 +621,9 @@ impl Runtime {
                                     }
                                     Err(error) => return Err(error),
                                 }
+                                break;
                             }
+                        }
                         }
                     }
                     bounded_send(&sender,o::SupervisorMessage {payload:Some(o::supervisor_message::Payload::Heartbeat(o::SupervisorHeartbeat {}))},&self.cancel).await?;
