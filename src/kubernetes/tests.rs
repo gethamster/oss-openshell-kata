@@ -562,6 +562,41 @@ esac
     }
 }
 #[tokio::test]
+async fn create_retry_recovers_verified_ssh_host_without_rotating_keys() {
+    let cluster = ClusterFixture::new();
+    let original = cluster.launch(&uuid::Uuid::new_v4().to_string()).await;
+    let host_key = cluster.store.key("id", "host_key.pub").expect("host key");
+    let mut interrupted = cluster.store.read("id").expect("read").expect("state");
+    interrupted.host.clear();
+    interrupted.runtime_identity.clear();
+    cluster
+        .store
+        .save(&interrupted)
+        .expect("interrupted intent");
+    cluster
+        .store
+        .known_hosts("id", "placeholder", &host_key)
+        .expect("initial host key");
+
+    let recovered = cluster.launch(&uuid::Uuid::new_v4().to_string()).await;
+    assert_eq!(recovered["runtime_identity"], original["runtime_identity"]);
+    assert_eq!(recovered["host"], original["host"]);
+    let known = std::fs::read_to_string(
+        cluster
+            .store
+            .folder("id")
+            .expect("folder")
+            .join("known_hosts"),
+    )
+    .expect("recovered host key");
+    assert_eq!(known.split_whitespace().next(), Some("10.176.0.5"));
+    assert_eq!(
+        cluster.store.key("id", "host_key.pub").expect("host key"),
+        host_key
+    );
+}
+
+#[tokio::test]
 async fn lifecycle_create_verify_stop_restart_delete_retains_only_the_private_volume() {
     let cluster = ClusterFixture::new();
     let first = uuid::Uuid::new_v4().to_string();

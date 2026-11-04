@@ -64,6 +64,8 @@ pub(super) async fn create(
         let retained = existing.context("existing runtime lacks matching retained identity")?;
         let (state, _) =
             proof::verify(client, &retained, launch.storage_class, launch.network).await?;
+        let host_key = store.key(launch.sandbox, "host_key.pub")?;
+        store.known_hosts(launch.sandbox, &state.host, &host_key)?;
         store.save(&state)?;
         return Ok(serde_json::to_value(Route::from(&state))?);
     }
