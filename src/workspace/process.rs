@@ -19,7 +19,7 @@ const RECORD_DIRECTORY: &str = ".system-processes";
 const MAX_COMMAND_BYTES: usize = 128 * 1024;
 const MAX_RECORD_BYTES: u64 = 4096;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Record {
     version: u32,
@@ -94,7 +94,7 @@ pub async fn run_child(workspace: &Workspace, id: &str, command: &str) -> Result
         if cancelled(workspace, id)? || frozen(workspace)? {
             return Ok(137);
         }
-        cancellation::run(workspace, id, &command).await
+        cancellation::run(workspace, id, &command, &record).await
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -127,7 +127,7 @@ pub fn kill(workspace: &Workspace, id: &str) -> Result<()> {
         use rustix::process::Pid;
         let pid = Pid::from_raw(i32::try_from(record.pid)?)
             .context("invalid workspace controller PID")?;
-        let observed = match identity(pid) {
+        let observed = match identity(pid).context("read workspace controller identity") {
             Ok(value) => value,
             Err(error) if is_missing(&error) => return Ok(()),
             Err(error) => return Err(error),
@@ -140,22 +140,29 @@ pub fn kill(workspace: &Workspace, id: &str) -> Result<()> {
             observed.group == record.pid && observed.session == record.pid,
             "workspace process session changed"
         );
-        let executable = std::fs::read_link(format!("/proc/{}/exe", record.pid))?;
-        ensure!(
-            executable == std::env::current_exe()?,
-            "workspace controller executable changed"
-        );
-        let argv = std::fs::read(format!("/proc/{}/cmdline", record.pid))?;
-        let tokens = argv.split(|byte| *byte == 0).collect::<Vec<_>>();
-        ensure!(
-            tokens
-                .windows(2)
-                .any(|pair| pair[0] == b"__run-child" && pair[1] == id.as_bytes()),
-            "workspace controller operation changed"
-        );
-        // The controller observes only its operation's durable marker. It
-        // never receives a cross-process numeric-PID or process-group signal.
-        mark_cancelled(workspace, id)
+        // Cross-process exe/cmdline access is deliberately restricted by the
+        // normal runtime. No PID is signalled here: the UUID-bound controller
+        // validates this exact record against its own retained identity.
+        replace_record(workspace, &format!("{id}.cancel"), &record)?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        loop {
+            if let Some(acknowledged) = read_record(workspace, &format!("{id}.cancel-ack"))? {
+                ensure!(
+                    acknowledged == record,
+                    "workspace cancellation acknowledgement changed"
+                );
+                return Ok(());
+            }
+            ensure!(
+                !drain_failed(workspace, id)?,
+                "workspace cancellation drain failed"
+            );
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "workspace cancellation was not acknowledged"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -225,6 +232,25 @@ fn publish_record(workspace: &Workspace, id: &str, record: &Record) -> Result<()
     result?;
     cleanup?;
     super::files::sync_directory(&directory)
+}
+
+#[cfg(target_os = "linux")]
+fn replace_record(workspace: &Workspace, id: &str, record: &Record) -> Result<()> {
+    let directory = process_directory(workspace)?;
+    let staged = format!(".identity-{}", Uuid::new_v4());
+    let mut options = super::files::private_file_options();
+    options.write(true).create_new(true);
+    let result: Result<()> = (|| {
+        let mut file = directory.open_with(&staged, &options)?;
+        file.write_all(&serde_json::to_vec(record)?)?;
+        file.sync_all()?;
+        directory.rename(&staged, &directory, format!("{id}.json"))?;
+        super::files::sync_directory(&directory)
+    })();
+    if result.is_err() {
+        let _ = directory.remove_file(staged);
+    }
+    result
 }
 
 fn cancelled(workspace: &Workspace, id: &str) -> Result<bool> {

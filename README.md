@@ -72,7 +72,10 @@ This image does not change the adapter's Kata-only compute contract.
 `null`; `capabilities` lists pending requests and `capability-ack <uuid>` removes
 one. A helper-managed command and its descendants are interrupted before status
 125 is returned. Cancellation publishes a durable request to the command's
-controller. The controller retains orphaned descendants as a Linux subreaper,
+controller, including its retained PID and start identity. The controller verifies
+that identity against its own launch record and acknowledges only after draining
+its descendants. This does not require cross-process executable inspection.
+The controller retains orphaned descendants as a Linux subreaper,
 signals only its own unreaped children, and waits for all of them to exit. It
 requires neither pidfds nor process-group signals, which normal OpenShell
 workloads prohibit. A failed drain retains evidence and prevents a successful

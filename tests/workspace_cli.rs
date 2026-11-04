@@ -301,6 +301,50 @@ mod linux {
     }
 
     #[test]
+    fn forged_cancel_request_never_acknowledges_or_becomes_quiescent() {
+        let root = tempfile::tempdir().expect("workspace");
+        let marker = root.path().join("ready");
+        let id = Uuid::new_v4().to_string();
+        let child = spawn(
+            root.path(),
+            &id,
+            &[
+                "sh",
+                "-c",
+                "touch \"$1\"; sleep 0.3",
+                "sh",
+                marker.to_str().expect("path"),
+            ],
+        );
+        wait_for(&marker);
+        let directory = root.path().join(".system-processes");
+        let mut record: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.join(format!("{id}.json"))).expect("record"),
+        )
+        .expect("record JSON");
+        record["start"] = (record["start"].as_u64().expect("start") + 1).into();
+        fs::write(
+            directory.join(format!("{id}.cancel.json")),
+            serde_json::to_vec(&record).expect("request"),
+        )
+        .expect("forged request");
+        let output = child
+            .wait_with_output()
+            .expect("controller rejected request");
+        assert!(!output.status.success());
+        assert!(!directory.join(format!("{id}.cancel-ack.json")).exists());
+        assert!(directory.join(format!("{id}.drain-failed")).exists());
+        assert!(
+            !helper(root.path())
+                .arg("quiesce")
+                .output()
+                .expect("quiescence check")
+                .status
+                .success()
+        );
+    }
+
+    #[test]
     fn cancellation_before_record_publication_prevents_later_execution() {
         let root = tempfile::tempdir().expect("workspace");
         let id = Uuid::new_v4().to_string();

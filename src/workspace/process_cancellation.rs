@@ -1,5 +1,5 @@
 //! Cooperative cancellation with kernel-owned, unreaped child identities.
-use super::{Workspace, cancelled, exit_code, frozen, identity};
+use super::{Record, Workspace, exit_code, frozen, identity};
 use anyhow::{Context, Result, ensure};
 use rustix::{
     io::Errno,
@@ -7,7 +7,12 @@ use rustix::{
 };
 use std::{io::Read, process::Stdio, time::Duration};
 
-pub(super) async fn run(workspace: &Workspace, id: &str, command: &[String]) -> Result<i32> {
+pub(super) async fn run(
+    workspace: &Workspace,
+    id: &str,
+    command: &[String],
+    expected: &Record,
+) -> Result<i32> {
     // Install a handler even when a launcher inherited SIGCHLD=SIG_IGN.
     // Otherwise Linux may auto-reap children and make numeric PIDs reusable.
     // Listening for SIGCHLD does not register any child with Tokio's reaper.
@@ -26,11 +31,23 @@ pub(super) async fn run(workspace: &Workspace, id: &str, command: &[String]) -> 
         .spawn()
         .context("spawn workspace command")?;
     loop {
-        if cancelled(workspace, id)? || frozen(workspace)? {
+        let requested = match super::read_record(workspace, &format!("{id}.cancel")) {
+            Ok(Some(record)) if &record != expected => {
+                super::mark_drain_failed(workspace, id)?;
+                anyhow::bail!("workspace cancellation request identity changed");
+            }
+            Ok(record) => record.is_some(),
+            Err(error) => {
+                super::mark_drain_failed(workspace, id)?;
+                return Err(error.context("read workspace cancellation request"));
+            }
+        };
+        if requested || frozen(workspace)? {
             if let Err(error) = stop_children().await {
                 super::mark_drain_failed(workspace, id)?;
                 return Err(error);
             }
+            super::replace_record(workspace, &format!("{id}.cancel-ack"), expected)?;
             return Ok(137);
         }
         if let Some(status) = child.try_wait()? {
