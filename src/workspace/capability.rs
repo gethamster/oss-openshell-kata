@@ -116,7 +116,9 @@ pub fn request_docker(workspace: &Workspace, args: &[String], compose: bool) -> 
         process::kill(workspace, &id)?;
         // Do not return into a compound shell command while its controller is
         // handling cancellation. The verified controller terminates the group.
-        std::thread::park();
+        loop {
+            std::thread::park();
+        }
     }
     Ok(125)
 }
