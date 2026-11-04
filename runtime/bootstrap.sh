@@ -19,7 +19,10 @@ sudo sed -i -E \
  -e "s/^default_memory = .*/default_memory = $memory/" \
  -e "s/^default_maxmemory = .*/default_maxmemory = $memory/" \
  -e 's/^overhead_vcpus = .*/overhead_vcpus = 0/' \
- -e 's/^overhead_memory = .*/overhead_memory = 0/' "$config"
+ -e 's/^overhead_memory = .*/overhead_memory = 0/' \
+ -e 's/^reconnect_timeout_ms = .*/reconnect_timeout_ms = 10000/' "$config"
+# Nested guests can reach kata-agent after the default connection retries run
+# out. Keep the dial interval unchanged; the lifecycle still bounds boot at 90s.
 if [[ "${1:-local}" == build ]]; then
   # Transparent huge pages remain charged to the normal memory cgroup. Avoid
   # hundreds of thousands of nested page-table entries for a large local VM.
