@@ -160,24 +160,9 @@ checks, concurrent commands, Dockerfile `RUN`, Compose, a gateway HTTP preview,
 stop/start, retained files and deletion. Network/resource qualification also
 requires negative tests from guest root; passing parser tests is insufficient.
 
-The [original qualification record](evidence/qualification.json) is the earlier
-upload-repair milestone, using the former compatibility runtime. It does not
-certify the new enforcement profile. The [enforcement qualification record](evidence/enforcement-qualification.json)
-records the initial Rust Kata enforcement milestone: 139 tests, 84.85% implementation line coverage,
-the complete CLI flow, guest-root network attacks, storage/resource bounds, and
-independent deadline termination. This qualifies the tested Apple Silicon/Lima
-profile; the broader production and platform matrix remains in
-[the policy plan](docs/POLICY_PLAN.md). The subsequent shared-runtime and System
-integration gates are tracked separately in [the delivery plan](docs/DELIVERY_PLAN.md).
-
-The [shared-runtime qualification](evidence/integration-qualification.json)
-records 247 macOS test results and 86.80% implementation line coverage. Both the
-stock CLI and the actual System sandbox backend passed file operations, command
-streams, Docker/Compose, preview, restart persistence and verified deletion with
-unmodified OpenShell 0.1.6. The System run used the production access router with
-a scoped local authorization fixture; hosted sign-in, immutable images and
-tenant isolation remain separate deployment gates. Hosted egress is still
-deny-all, so this does not qualify hosted internet-dependent builds.
+Historical qualification receipts are retained under `evidence/`. Use the
+[enforcement contract](docs/ENFORCEMENT_CONTRACT.md) and
+[hosted profile](docs/HOSTED.md) for the current supported controls and setup.
 
 ## Cleanup and delivery scope
 
@@ -196,8 +181,8 @@ The hosted deployment is coordinated separately with its SRE owner. A passing
 local profile does not qualify its Kubernetes artifacts or tenant cutover.
 
 The external compute interface is versioned, while the supervisor protocol is
-internal. Upgrading OpenShell requires requalification. See [porting notes](docs/PORTING.md)
-and [the delivery plan](docs/DELIVERY_PLAN.md) for remaining production work.
+internal. For an OpenShell upgrade, verify the changed protocol and runtime
+behavior using the [porting notes](docs/PORTING.md).
 
 ## License
 
