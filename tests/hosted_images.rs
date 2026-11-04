@@ -120,7 +120,10 @@ fn hosted_owner_images_use_the_existing_resource_and_policy_ceiling() -> anyhow:
             .policy
             .as_mut()
             .expect("policy")
-            .filesystem = Some(s::FilesystemPolicy::default());
+            .filesystem = Some(s::FilesystemPolicy {
+            read_write: vec!["/sandbox".into()],
+            ..Default::default()
+        });
         assert!(
             config.validate_request(&request).is_err(),
             "owner cannot claim native isolation"
