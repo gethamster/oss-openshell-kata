@@ -82,9 +82,14 @@ workloads prohibit. A failed drain retains evidence and prevents a successful
 quiescence check.
 
 `hold <uuid>` keeps an interrupted owner workload available for file transfer.
-`quiesce` blocks new helper commands, stops managed descendants, and refuses
-transfer preparation while an untracked live process remains; `thaw` permits
-commands after a failed move.
+`quiesce` blocks new helper commands, stops managed descendants and holders,
+and refuses transfer preparation while any untracked live process remains.
+A writable holder record never exempts a live process from this check.
+`quiesce-export` performs quiescence and streams the archive within one already
+admitted command; use it when holder exit completes the sandbox's main process
+and prevents admitting another command. The source files remain intact on
+failure. Recovery must restore an authorized running transport before using
+`thaw`; do not recreate or discard the authoritative source to conceal failure.
 
 `export` and `import` stream deterministic USTAR workspace archives for runtime
 moves. They retain hidden files and executable permissions, allow only relative

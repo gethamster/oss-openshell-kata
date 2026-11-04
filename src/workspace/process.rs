@@ -459,6 +459,7 @@ pub async fn quiesce(workspace: &Workspace) -> Result<()> {
             Ok(active)
         })?;
         if !active {
+            stop_holders(workspace).await?;
             verify_quiescent(workspace)?;
             return Ok(());
         }
@@ -511,29 +512,59 @@ fn ancestors(mut pid: rustix::process::Pid) -> Result<Vec<Ancestor>> {
     Ok(result)
 }
 
-#[cfg(target_os = "linux")]
-fn holding(record: &Record, id: &str) -> Result<bool> {
-    let Some(pid) = i32::try_from(record.pid)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw)
-    else {
-        return Ok(false);
-    };
-    let Ok(current) = identity(pid) else {
-        return Ok(false);
-    };
-    if current.start != record.start || current.state == "Z" {
-        return Ok(false);
+/// Holders are stopped through their own identity-bound requests. No live
+/// process is exempted based on a writable workspace record.
+async fn stop_holders(workspace: &Workspace) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let directory = process_directory(workspace)?;
+        let mut holders = Vec::new();
+        for entry in directory.entries()? {
+            let name = entry?.file_name();
+            let Some(id) = name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".hold.json"))
+            else {
+                continue;
+            };
+            validate_id(id)?;
+            let Some(record) = read_record(workspace, &format!("{id}.hold"))? else {
+                continue;
+            };
+            ensure!(record.version == 1, "unsupported holder identity");
+            replace_record(workspace, &format!("{id}.hold-exit"), &record)?;
+            holders.push(record);
+            ensure!(holders.len() <= 4096, "workspace holder limit exceeded");
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let mut live = false;
+            for record in &holders {
+                let pid = i32::try_from(record.pid)
+                    .ok()
+                    .and_then(rustix::process::Pid::from_raw)
+                    .context("invalid holder PID")?;
+                match identity(pid) {
+                    Ok(current) => live |= current.start == record.start && current.state != "Z",
+                    Err(error) if is_missing(&error) => {}
+                    Err(error) => return Err(error.context("verify holder exit")),
+                }
+            }
+            if !live {
+                return Ok(());
+            }
+            ensure!(
+                tokio::time::Instant::now() < deadline,
+                "workspace holders did not exit"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
-    if std::fs::read_link(format!("/proc/{}/exe", record.pid))? != std::env::current_exe()? {
-        return Ok(false);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = workspace;
+        anyhow::bail!("workspace quiescence requires Linux")
     }
-    let argv = std::fs::read(format!("/proc/{}/cmdline", record.pid))?;
-    Ok(argv
-        .split(|byte| *byte == 0)
-        .collect::<Vec<_>>()
-        .windows(2)
-        .any(|pair| pair[0] == b"hold" && pair[1] == id.as_bytes()))
 }
 
 /// Recheck the frozen source immediately before reading an export.
@@ -541,7 +572,7 @@ pub(super) fn verify_quiescent(_workspace: &Workspace) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         let workspace = _workspace;
-        let mut allowed = ancestors(rustix::process::getpid())?;
+        let allowed = ancestors(rustix::process::getpid())?;
         for entry in process_directory(workspace)?.entries()? {
             let name = entry?.file_name();
             ensure!(
@@ -550,20 +581,6 @@ pub(super) fn verify_quiescent(_workspace: &Workspace) -> Result<()> {
                     .is_some_and(|name| name.ends_with(".drain-failed")),
                 "workspace descendant drain remains unverified"
             );
-            if let Some(id) = name
-                .to_str()
-                .and_then(|name| name.strip_suffix(".hold.json"))
-            {
-                validate_id(id)?;
-                if let Some(record) = read_record(workspace, &format!("{id}.hold"))?
-                    && holding(&record, id)?
-                {
-                    allowed.push(Ancestor {
-                        pid: record.pid,
-                        start: record.start,
-                    });
-                }
-            }
         }
         require_quiescent(&allowed)?;
     }
@@ -620,16 +637,19 @@ pub async fn hold(_workspace: &Workspace, id: &str) -> Result<()> {
     {
         let workspace = _workspace;
         let pid = rustix::process::getpid();
-        publish_record(
-            workspace,
-            &format!("{id}.hold"),
-            &Record {
-                version: 1,
-                pid: pid.as_raw_nonzero().get() as u32,
-                start: identity(pid)?.start,
-            },
-        )?;
-        std::future::pending::<()>().await;
+        let record = Record {
+            version: 1,
+            pid: pid.as_raw_nonzero().get() as u32,
+            start: identity(pid)?.start,
+        };
+        publish_record(workspace, &format!("{id}.hold"), &record)?;
+        loop {
+            if let Some(request) = read_record(workspace, &format!("{id}.hold-exit"))? {
+                ensure!(request == record, "workspace holder stop identity changed");
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
     anyhow::bail!("workspace holding requires Linux")
 }

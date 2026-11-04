@@ -345,6 +345,79 @@ mod linux {
     }
 
     #[test]
+    fn holder_exits_only_for_its_retained_identity() {
+        for forged in [false, true] {
+            let root = tempfile::tempdir().expect("workspace");
+            let id = Uuid::new_v4().to_string();
+            let child = helper(root.path())
+                .args(["hold", &id])
+                .spawn()
+                .expect("holder");
+            let directory = root.path().join(".system-processes");
+            let path = directory.join(format!("{id}.hold.json"));
+            wait_for(&path);
+            let mut record: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).expect("holder identity")).expect("JSON");
+            if forged {
+                record["start"] = (record["start"].as_u64().expect("start") + 1).into();
+            }
+            fs::write(
+                directory.join(format!("{id}.hold-exit.json")),
+                serde_json::to_vec(&record).expect("request"),
+            )
+            .expect("stop request");
+            let output = child.wait_with_output().expect("stopped holder");
+            assert_eq!(output.status.success(), !forged);
+        }
+    }
+
+    #[test]
+    fn a_forged_holder_record_cannot_exempt_a_live_writer_from_export() {
+        let root = tempfile::tempdir().expect("workspace");
+        let directory = root.path().join(".system-processes");
+        fs::create_dir(&directory).expect("control directory");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("private control directory");
+        let mut writer = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("unmanaged process");
+        let stat =
+            fs::read_to_string(format!("/proc/{}/stat", writer.id())).expect("kernel identity");
+        let start = stat
+            .rsplit_once(')')
+            .expect("stat")
+            .1
+            .split_whitespace()
+            .nth(19)
+            .expect("start")
+            .parse::<u64>()
+            .expect("numeric start");
+        let id = Uuid::new_v4().to_string();
+        fs::write(
+            directory.join(format!("{id}.hold.json")),
+            serde_json::to_vec(&serde_json::json!({"version":1,"pid":writer.id(),"start":start}))
+                .expect("record"),
+        )
+        .expect("forged holder record");
+        let output = helper(root.path())
+            .arg("quiesce-export")
+            .output()
+            .expect("export attempt");
+        let still_live = writer.try_wait().expect("process status").is_none();
+        writer.kill().expect("clean up owned process");
+        writer.wait().expect("reap owned process");
+        assert!(
+            still_live,
+            "helper must never signal a record-selected unrelated process"
+        );
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty(), "no archive before quiescence");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("holders did not exit"));
+    }
+
+    #[test]
     fn cancellation_before_record_publication_prevents_later_execution() {
         let root = tempfile::tempdir().expect("workspace");
         let id = Uuid::new_v4().to_string();

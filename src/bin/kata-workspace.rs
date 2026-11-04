@@ -23,6 +23,7 @@ enum Operation {
     },
     Capabilities,
     Quiesce,
+    QuiesceExport,
     Hold {
         id: String,
     },
@@ -103,6 +104,11 @@ async fn execute(cli: Cli) -> Result<i32> {
                 "{}",
                 serde_json::to_string(&workspace::capability(&workspace, &id)?)?
             );
+            Ok(0)
+        }
+        Operation::QuiesceExport => {
+            workspace::quiesce(&workspace).await?;
+            workspace::export(&workspace, std::io::stdout().lock())?;
             Ok(0)
         }
         Operation::Export => {
