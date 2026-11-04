@@ -1,5 +1,6 @@
 //! Cloud-independent Kubernetes launcher for operator-qualified Rust Kata guests.
 
+mod billing;
 mod broker;
 mod broker_config;
 mod broker_manifest;
