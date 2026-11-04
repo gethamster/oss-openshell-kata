@@ -59,7 +59,11 @@ range and recovery settings. Its current network capability is deny-all guest
 egress; the local TCP broker is a separate capability. `kata-operator` handles
 trusted startup preparation and socket readiness without Python. Both guest
 recipes include `kata-workspace` for System command/file operations and protocol
-compatibility checks.
+compatibility checks. When layering a new System environment with
+`runtime/Dockerfile.layer`, pass `--build-arg WORKSPACE_HELPER_IMAGE=<image@sha256:...>`
+to reuse the static helper from an already-qualified guest image. The default
+builds the helper from this checkout. Release records must retain both the base
+and helper image digests; layer smoke checks still run.
 
 Normal OpenShell workloads can use [the standard image](runtime/Dockerfile.standard),
 which runs as UID/GID 1000 and includes the same workspace helper without a Docker
