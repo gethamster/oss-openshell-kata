@@ -195,6 +195,9 @@ fn pod_has_private_storage_no_token_fixed_vm_and_no_python_probe() {
     let pod = manifest::pod("id", "sandbox-1h31c", &image());
     assert_eq!(pod["spec"]["automountServiceAccountToken"], false);
     assert_eq!(pod["spec"]["runtimeClassName"], manifest::RUNTIME);
+    // Node-origin TCP probes are intentionally outside the guest packet policy.
+    assert!(pod["spec"]["containers"][0]["readinessProbe"]["exec"].is_object());
+    assert!(pod["spec"]["containers"][0]["readinessProbe"]["tcpSocket"].is_null());
     assert_eq!(
         pod["spec"]["containers"][0]["resources"]["limits"],
         manifest::limits()

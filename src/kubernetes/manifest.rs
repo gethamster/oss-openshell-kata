@@ -59,7 +59,7 @@ pub(super) fn pod(name: &str, namespace: &str, image: &str) -> Value {
             "resources":resources,"env":[{"name":"DOCKER_TLS_CERTDIR","value":""},
                 {"name":"KATA_DOCKER_STORAGE_DRIVER","value":"vfs"}],
             "command":["/usr/local/sbin/openshell-kata-init"],
-            "readinessProbe":{"tcpSocket":{"port":22},"initialDelaySeconds":2,"periodSeconds":2},
+            "readinessProbe":{"exec":{"command":["sh","-ec","test -n \"$(ss -H -lnt 'sport = :22')\""]},"initialDelaySeconds":2,"periodSeconds":2},
             "startupProbe":{"exec":{"command":["docker","info"]},
                 "periodSeconds":2,"timeoutSeconds":3,"failureThreshold":90},
             "volumeMounts":[{"name":"data","mountPath":"/sandbox","subPath":"workspace"},
