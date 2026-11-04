@@ -45,6 +45,11 @@ Recovery should not depend on new traffic or on a resource whose exhaustion caus
 the stop. Keep a failed dependency or background operation from unnecessarily
 stopping independent work.
 
+Keep the current owner responsible for restoring an unavailable dependency and
+resuming the original operation after reconciliation. A transient readiness
+failure is not a user handoff. Reuse the original identity and confirmed results
+rather than starting another operation or asking the user to repeat the request.
+
 Budget queueing, database work, upstream time, and recovery within the operation’s
 latency contract. Measure contention and redundant work before adding retries,
 caches, concurrency, or longer deadlines. Recovery shares the original limits;

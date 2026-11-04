@@ -36,6 +36,11 @@ longer timeouts. Parallelize independent builds and review when the saved time
 exceeds contention and coordination costs. Serialize real dependencies and
 mutations of shared staging environments; keep one owner for those environments.
 
+Delete obsolete checks, one-time repair paths, and superseded scripts directly.
+Do not replace their overhead with a new classifier, registry, harness, mandatory
+benchmark, or approval unless the requested result requires it. Missing timing
+data does not justify retaining demonstrably unused work or delaying its removal.
+
 Preserve mandatory tests, protections, human decisions, and security boundaries.
 Reuse completed builds and still-valid evidence under the owning policy. A
 cancelled or superseded deployment does not invalidate a successfully built
@@ -55,10 +60,11 @@ Fix forward without rollback support, dual formats, or legacy readers.
 
 ## Verify the improvement
 
-Run the relevant required checks and observe the affected pipeline path after the
-change. Compare it with a stated baseline using similar workloads and runner
-conditions. Account for work moved into another stage, retries, or resource costs;
-a shorter build is not an improvement if total verified delivery is slower.
+Use existing run records and one relevant post-change observation to check the
+affected pipeline path. Run applicable existing checks once; repeat only for a
+material change or observed failure. Compare available timings under similar
+workloads and runner conditions, including work moved into another stage. Do not
+create a recurring measurement or verification process for a bounded cleanup.
 
 Report the bottleneck, change, measured stage and total times, workload conditions,
 and remaining uncertainty. Retain verification of the artifact or operation at
