@@ -1,12 +1,14 @@
 # syntax=docker/dockerfile:1.7
 # Turn an Ubuntu/Debian-based environment image into an admissible Kata guest:
 # the native guest init, SSH entry as `sandbox` (uid 1000, home /sandbox), an
-# in-guest Docker daemon and the static workspace helper from this source tree.
+# in-guest Docker daemon and the static workspace helper.
 # Build from the repository root:
 #   docker build -f runtime/Dockerfile.layer --build-arg BASE=<image@sha256:...> .
 ARG BASE
+# Reuse a qualified helper by immutable digest, or compile this checkout.
+ARG WORKSPACE_HELPER_IMAGE=compiled-helper
 
-FROM rust:1.98.1-alpine@sha256:7cc1c22d77d9432f7fe012a70e6d3e555af54c2a6832700ed7d553f1769ae89f AS helper
+FROM rust:1.98.1-alpine@sha256:7cc1c22d77d9432f7fe012a70e6d3e555af54c2a6832700ed7d553f1769ae89f AS compiled-helper
 RUN apk add --no-cache build-base perl cmake
 WORKDIR /src
 COPY Cargo.toml Cargo.lock build.rs ./
@@ -17,7 +19,15 @@ COPY protocol ./protocol
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
     cargo build --release --locked --bin kata-workspace \
-    && install -D target/release/kata-workspace /out/kata-workspace
+    && install -D target/release/kata-workspace /usr/local/bin/kata-workspace
+
+FROM ${WORKSPACE_HELPER_IMAGE} AS helper
+ARG WORKSPACE_HELPER_IMAGE
+RUN set -eux; \
+    if [ "$WORKSPACE_HELPER_IMAGE" != compiled-helper ]; then \
+      printf '%s\n' "$WORKSPACE_HELPER_IMAGE" | grep -Eq '^[^[:space:]@]+@sha256:[0-9a-f]{64}$'; \
+    fi; \
+    test "$(/usr/local/bin/kata-workspace protocol)" = openshell-kata-workspace/1
 
 # Debian's docker.io package does not supply the Compose CLI plugin. Carry the
 # same independently packaged plugin as normal sandboxes, without another daemon.
@@ -48,7 +58,7 @@ RUN set -eux; \
     mkdir -p /sandbox /run/guest-ssh /run/sshd; \
     chown 1000:1000 /sandbox; \
     test "$(id -u sandbox)" = 1000
-COPY --from=helper /out/kata-workspace /usr/local/bin/kata-workspace
+COPY --from=helper /usr/local/bin/kata-workspace /usr/local/bin/kata-workspace
 COPY --from=compose /usr/libexec/docker/cli-plugins/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
 COPY runtime/guest-init.sh /usr/local/sbin/openshell-kata-init
 COPY runtime/sshd_config /etc/ssh/openshell-kata.conf
