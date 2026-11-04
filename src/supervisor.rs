@@ -555,7 +555,7 @@ impl Runtime {
             tokio::select! {
                 () = self.cancel.cancelled() => return Ok(()),
                 _ = refresh.tick(), if self.is_enforced() => { self.refresh_credential(&mut client).await?; },
-                _ = heartbeat.tick() => {
+                _ = heartbeat.tick(), if session.is_some() => {
                     if self.vm_policy.is_some() || self.config.runtime_profile == RuntimeProfile::Kubernetes {
                         let last_verified = verified_at;
                         let revalidation = tokio::time::timeout(REVALIDATION_DEADLINE, async {
