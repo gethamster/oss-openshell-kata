@@ -248,8 +248,5 @@ Root-owned mount directories remain unchanged; driver/trust use private owned
 children. The gateway's `SSL_CERT_FILE` must select the resulting private bundle.
 
 The SRE deployment owner retains cluster installation, trusted identity/access,
-namespace admission, image promotion and live tenant qualification. The original
-hosted sibling `e2d897e` and its image receipts are separate baseline evidence.
-The reconciled Rust candidate must repeat the complete System/CLI flow, two-tenant
-denials, token renewal, lease expiry, restart/recovery and observation period on
-its exact artifacts before promotion. See `DELIVERY_PLAN.md` for current gates.
+namespace admission, image promotion and live tenant qualification. Use the [enforcement contract](ENFORCEMENT_CONTRACT.md) for the current runtime
+requirements and qualify the changed hosted behavior against its exact artifacts.
