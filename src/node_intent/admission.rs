@@ -340,11 +340,18 @@ fn validate_guest(
     let init = guest["spec"]["initContainers"]
         .as_array()
         .context("guest storage initializer missing")?;
+    let admitted = |image: &Value| {
+        image == &config.guest_image
+            || config
+                .additional_guest_images
+                .iter()
+                .any(|pin| image == pin)
+    };
     ensure!(
         containers.len() == 1
-            && containers[0]["image"] == config.guest_image
+            && admitted(&containers[0]["image"])
             && init.len() == 1
-            && init[0]["image"] == config.guest_image,
+            && init[0]["image"] == containers[0]["image"],
         "guest image inventory differs"
     );
     let now = super::host::now()?;

@@ -113,6 +113,49 @@ fn api_identity_and_restartable_controller_sidecars_are_bound_before_network_obs
 }
 
 #[test]
+fn owner_guest_images_are_pinned_and_match_the_storage_initializer() -> Result<()> {
+    let (mut config, guest, launch) = fixture()?;
+    assert!(
+        config.additional_guest_images.is_empty(),
+        "omitted list preserves the default"
+    );
+    let owner = format!("registry.example/team-workspace@sha256:{}", "b".repeat(64));
+    let thread = format!("registry.example/thread-minion@sha256:{}", "c".repeat(64));
+    config.additional_guest_images = vec![owner.clone(), thread.clone()];
+    config.validate()?;
+    for image in [IMAGE, owner.as_str(), thread.as_str()] {
+        let mut selected = guest.clone();
+        selected["spec"]["containers"][0]["image"] = json!(image);
+        selected["spec"]["initContainers"][0]["image"] = json!(image);
+        let intent = admission::derive(&config, &selected, &launch)?;
+        assert_eq!(intent.pod_uid, UID);
+        assert_eq!(intent.namespace_uid, NS);
+        assert_eq!(intent.launch_nonce, NONCE);
+        // Even two admitted images may not be mixed within one guest generation.
+        selected["spec"]["initContainers"][0]["image"] =
+            json!(if image == IMAGE { &owner } else { IMAGE });
+        assert!(admission::derive(&config, &selected, &launch).is_err());
+    }
+    for image in [
+        "registry.example/owner:latest".to_owned(),
+        format!("registry.example/foreign@sha256:{}", "d".repeat(64)),
+    ] {
+        let mut selected = guest.clone();
+        selected["spec"]["containers"][0]["image"] = json!(image);
+        selected["spec"]["initContainers"][0]["image"] = json!(image);
+        assert!(admission::derive(&config, &selected, &launch).is_err());
+    }
+    config
+        .additional_guest_images
+        .push("registry.example/owner:latest".into());
+    assert!(
+        config.validate().is_err(),
+        "operator additions must also be digest pinned"
+    );
+    Ok(())
+}
+
+#[test]
 fn namespace_mirrors_are_optional_but_guest_generation_is_required() -> Result<()> {
     let (config, mut guest, mut launch) = fixture()?;
     for namespace in [
