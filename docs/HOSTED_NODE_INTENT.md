@@ -28,12 +28,18 @@ the trusted host directory rather than supplied through ConfigMap symlinks.
 | `nsenter_path`, `ip_path` | Trusted Linux namespace and network observation executables |
 | `broker_namespace`, `broker_namespace_uid` | `openshell-network` and its exact Namespace UID |
 | `broker_image`, `guest_image` | Qualified image references pinned by digest |
+| `additional_guest_images` | Optional additional qualified guest image digests; defaults to an empty list |
 | `operator_network_config_path` | Root-owned immutable `HostedNetworkConfig` JSON shared with the launcher |
 | `controller_namespace`, `controller_namespace_uid` | Exact namespace of authorized SSH controller Pods |
 | `controller_labels` | Nonempty exact label map selecting those Pods |
 | `controller_container_images` | Exact regular container name-to-image-digest map |
 | `controller_init_container_images` | Exact init container name-to-image-digest map; defaults to empty |
 | `controller_restartable_init_containers` | Names of init containers using `restartPolicy: Always`; defaults to empty |
+
+The guest and its storage initializer must use the same admitted image. Configure
+the same default and additional guest pins as the adapter. Additional images keep
+the hosted resource profile, network ceiling and generation checks; callers cannot
+select an unlisted image or mix two admitted images in one Pod.
 
 The kubeconfig must select one HTTPS cluster with an explicit CA file or CA
 data and one user containing only an absolute `tokenFile`. TLS verification
