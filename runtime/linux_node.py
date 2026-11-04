@@ -86,7 +86,10 @@ def runtime_configuration(original, selected):
     cpu, memory, _, _ = profile(selected)
     replacements = {"default_vcpus": str(cpu), "default_maxvcpus": str(cpu),
                     "default_memory": str(memory), "default_maxmemory": str(memory),
-                    "shared_fs": '"none"'}
+                    "shared_fs": '"none"',
+                    # Slow guest boots must not exhaust the agent retry count
+                    # before the lifecycle's independently bounded boot ends.
+                    "reconnect_timeout_ms": "10000"}
     for key, value in replacements.items():
         original, count = re.subn(r"(?m)^" + key + r"\s*=.*$", key + " = " + value, original)
         if count != 1:

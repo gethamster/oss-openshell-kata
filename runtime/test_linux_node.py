@@ -27,15 +27,22 @@ class NativeNodeTests(unittest.TestCase):
                 node.capacity(rejected)
 
     def test_runtime_config_disables_shared_files_and_bounds_hardware(self):
-        original = '[hypervisor.dragonball]\ndefault_vcpus = 1\ndefault_maxvcpus = 1\ndefault_memory = 2048\ndefault_maxmemory = 2048\nshared_fs = "virtio-fs"\nblock_device_driver = "virtio-blk-pci"\n'
+        original = '[hypervisor.dragonball]\ndefault_vcpus = 1\ndefault_maxvcpus = 1\ndefault_memory = 2048\ndefault_maxmemory = 2048\nshared_fs = "virtio-fs"\nblock_device_driver = "virtio-blk-pci"\n[agent.kata]\ndial_timeout_ms = 10\nreconnect_timeout_ms = 3000\n'
         result = node.runtime_configuration(original, "foundry-build")
         self.assertIn('default_maxvcpus = 32', result)
         self.assertIn('default_memory = 131072', result)
         self.assertIn('shared_fs = "none"', result)
+        self.assertIn('reconnect_timeout_ms = 10000', result)
+        self.assertIn('dial_timeout_ms = 10', result)
+        self.assertEqual(node.runtime_configuration(result, "foundry-build"), result)
         # Native x86 Dragonball uses PCI; ARM's mmio workaround must not leak.
         self.assertIn('block_device_driver = "virtio-blk-pci"', result)
         with self.assertRaises(ValueError):
             node.runtime_configuration(original.replace('shared_fs = "virtio-fs"\n', ''), "local")
+        for invalid in (original.replace('reconnect_timeout_ms = 3000\n', ''),
+                        original + 'reconnect_timeout_ms = 3000\n'):
+            with self.assertRaisesRegex(ValueError, 'reconnect_timeout_ms'):
+                node.runtime_configuration(invalid, "local")
 
     def test_pool_verification_binds_devices_and_rejects_recycled_block_exposure(self):
         table = '0 2684354560 thin-pool 7:1 7:0 128 32768 1 error_if_no_space'
@@ -126,7 +133,7 @@ class NativeSetupIntegrationTests(unittest.TestCase):
                         stream.truncate(int(args[2]))
                 if args[0] == 'tar':
                     runtime.parent.mkdir(parents=True, exist_ok=True)
-                    runtime.write_text('default_vcpus = 1\ndefault_maxvcpus = 1\ndefault_memory = 2048\ndefault_maxmemory = 2048\nshared_fs = "virtio-fs"\nblock_device_driver = "virtio-blk-pci"\n')
+                    runtime.write_text('default_vcpus = 1\ndefault_maxvcpus = 1\ndefault_memory = 2048\ndefault_maxmemory = 2048\nshared_fs = "virtio-fs"\nblock_device_driver = "virtio-blk-pci"\n[agent.kata]\ndial_timeout_ms = 10\nreconnect_timeout_ms = 3000\n')
                 if args[0] == 'losetup':
                     path = args[-1] if '--find' in args else args[2]
                     if '--find' in args:
