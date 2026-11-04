@@ -651,6 +651,7 @@ pub async fn hold(_workspace: &Workspace, id: &str) -> Result<()> {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
+    #[cfg(not(target_os = "linux"))]
     anyhow::bail!("workspace holding requires Linux")
 }
 
