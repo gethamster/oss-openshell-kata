@@ -193,7 +193,15 @@ pub(super) async fn reconcile(client: &Client, workspace: &str, _pods: &[Value])
     let Some(billing) = Billing::configured()? else {
         return Ok(());
     };
-    for entry in fs::read_dir(&billing.config.outbox_dir)?.take(1000) {
+    for entry in fs::read_dir(&billing.config.outbox_dir)?
+        .filter(|entry| {
+            entry.is_err()
+                || entry
+                    .as_ref()
+                    .is_ok_and(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        })
+        .take(1000)
+    {
         let path = entry?.path();
         if path.extension().is_none_or(|ext| ext != "json") {
             continue;
