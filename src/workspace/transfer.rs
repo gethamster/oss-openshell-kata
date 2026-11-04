@@ -59,6 +59,7 @@ fn link_target(name: &str, target: &Path) -> Result<()> {
 
 /// Export files, directories and confined relative symlinks in canonical order.
 pub fn export(workspace: &Workspace, output: impl Write) -> Result<()> {
+    super::process::verify_frozen_export(workspace)?;
     let mut archive = tar::Builder::new(output);
     let mut entries = 0;
     let mut bytes = 0;

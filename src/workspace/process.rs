@@ -362,24 +362,6 @@ fn exit_code(status: ExitStatus) -> i32 {
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(1))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn process_argument_validation_rejects_ambiguous_identity_and_commands() {
-        assert!(validate_id("../other").is_err());
-        assert!(validate_id("550E8400-E29B-41D4-A716-446655440000").is_err());
-        for command in ["null", "[]", "[\"\"]", "[\"x\\u0000y\"]"] {
-            assert!(validate_command(command).is_err(), "accepted {command}");
-        }
-        assert_eq!(
-            validate_command("[\"printf\",\"%s\",\"a b\"]").expect("command"),
-            ["printf", "%s", "a b"]
-        );
-    }
-}
-
 const FREEZE_MARKER: &str = ".system-quiesced";
 
 fn frozen(workspace: &Workspace) -> Result<bool> {
@@ -409,26 +391,9 @@ pub async fn quiesce(workspace: &Workspace) -> Result<()> {
     }
     super::files::sync_directory(&workspace.directory)?;
     let directory = process_directory(workspace)?;
-    #[cfg(target_os = "linux")]
-    let mut allowed = ancestors(rustix::process::getpid())?;
     let mut ids = Vec::new();
     for entry in directory.entries()? {
         let name = entry?.file_name();
-        #[cfg(target_os = "linux")]
-        if let Some(id) = name
-            .to_str()
-            .and_then(|name| name.strip_suffix(".hold.json"))
-        {
-            validate_id(id)?;
-            if let Some(record) = read_record(workspace, &format!("{id}.hold"))?
-                && holding(&record, id)?
-            {
-                allowed.push(Ancestor {
-                    pid: record.pid,
-                    start: record.start,
-                });
-            }
-        }
         if let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".json"))
             && Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id)
         {
@@ -458,8 +423,7 @@ pub async fn quiesce(workspace: &Workspace) -> Result<()> {
             Ok(active)
         })?;
         if !active {
-            #[cfg(target_os = "linux")]
-            require_quiescent(&allowed)?;
+            verify_quiescent(workspace)?;
             return Ok(());
         }
         ensure!(
@@ -536,6 +500,41 @@ fn holding(record: &Record, id: &str) -> Result<bool> {
         .any(|pair| pair[0] == b"hold" && pair[1] == id.as_bytes()))
 }
 
+/// Recheck the frozen source immediately before reading an export.
+pub(super) fn verify_quiescent(_workspace: &Workspace) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let workspace = _workspace;
+        let mut allowed = ancestors(rustix::process::getpid())?;
+        for entry in process_directory(workspace)?.entries()? {
+            let name = entry?.file_name();
+            if let Some(id) = name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".hold.json"))
+            {
+                validate_id(id)?;
+                if let Some(record) = read_record(workspace, &format!("{id}.hold"))?
+                    && holding(&record, id)?
+                {
+                    allowed.push(Ancestor {
+                        pid: record.pid,
+                        start: record.start,
+                    });
+                }
+            }
+        }
+        require_quiescent(&allowed)?;
+    }
+    Ok(())
+}
+
+pub(super) fn verify_frozen_export(workspace: &Workspace) -> Result<()> {
+    if frozen(workspace)? {
+        verify_quiescent(workspace)?;
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn require_quiescent(allowed: &[Ancestor]) -> Result<()> {
     let own = rustix::process::getpid().as_raw_nonzero().get() as u32;
@@ -591,4 +590,22 @@ pub async fn hold(_workspace: &Workspace, id: &str) -> Result<()> {
         std::future::pending::<()>().await;
     }
     anyhow::bail!("workspace holding requires Linux")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_argument_validation_rejects_ambiguous_identity_and_commands() {
+        assert!(validate_id("../other").is_err());
+        assert!(validate_id("550E8400-E29B-41D4-A716-446655440000").is_err());
+        for command in ["null", "[]", "[\"\"]", "[\"x\\u0000y\"]"] {
+            assert!(validate_command(command).is_err(), "accepted {command}");
+        }
+        assert_eq!(
+            validate_command("[\"printf\",\"%s\",\"a b\"]").expect("command"),
+            ["printf", "%s", "a b"]
+        );
+    }
 }

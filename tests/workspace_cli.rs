@@ -28,6 +28,43 @@ fn protocol_is_available_without_opening_the_default_workspace() {
 }
 
 #[test]
+fn unmanaged_docker_request_is_structured_and_acknowledgeable() {
+    let root = tempfile::tempdir().expect("workspace");
+    let output = helper(root.path())
+        .args(["docker", "info"])
+        .env_remove("OPENSHELL_WORKSPACE_COMMAND_ID")
+        .env_remove("OPENSHELL_WORKSPACE_ROOT")
+        .output()
+        .expect("request Docker");
+    assert_eq!(output.status.code(), Some(125));
+    let pending = helper(root.path())
+        .arg("capabilities")
+        .output()
+        .expect("pending requests");
+    let requests: Vec<serde_json::Value> =
+        serde_json::from_slice(&pending.stdout).expect("requests");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["capability"], "docker");
+    let id = requests[0]["command_id"].as_str().expect("command UUID");
+    assert!(uuid::Uuid::parse_str(id).is_ok());
+    assert!(
+        helper(root.path())
+            .args(["capability-ack", id])
+            .status()
+            .expect("acknowledge")
+            .success()
+    );
+    assert_eq!(
+        helper(root.path())
+            .arg("capabilities")
+            .output()
+            .expect("cleared")
+            .stdout,
+        b"[]\n"
+    );
+}
+
+#[test]
 fn cli_files_preserve_binary_bytes_missing_status_and_removal_flags() {
     let root = tempfile::tempdir().expect("workspace");
     let bytes = b"binary\0file\xff";
