@@ -651,6 +651,16 @@ pub async fn hold(_workspace: &Workspace, id: &str) -> Result<()> {
         loop {
             if let Some(request) = read_record(workspace, &format!("{id}.hold-exit"))? {
                 ensure!(request == record, "workspace holder stop identity changed");
+                ensure!(
+                    read_record(workspace, &format!("{id}.hold"))? == Some(record),
+                    "workspace holder identity was replaced"
+                );
+                let directory = process_directory(workspace)?;
+                // Remove the consumed request before freeing the identity so
+                // a verified source restart can reuse its canonical holder ID.
+                directory.remove_file(format!("{id}.hold-exit.json"))?;
+                directory.remove_file(format!("{id}.hold.json"))?;
+                super::files::sync_directory(&directory)?;
                 return Ok(());
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;

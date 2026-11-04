@@ -368,6 +368,10 @@ mod linux {
             .expect("stop request");
             let output = child.wait_with_output().expect("stopped holder");
             assert_eq!(output.status.success(), !forged);
+            if !forged {
+                assert!(!directory.join(format!("{id}.hold.json")).exists());
+                assert!(!directory.join(format!("{id}.hold-exit.json")).exists());
+            }
         }
     }
 
