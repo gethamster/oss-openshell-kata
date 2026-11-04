@@ -612,6 +612,27 @@ pub async fn hold(_workspace: &Workspace, id: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_drain_retains_record_and_blocks_export_after_thaw() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let workspace = Workspace::open(directory.path()).expect("open workspace");
+        let id = Uuid::new_v4().to_string();
+        let pid = rustix::process::getpid();
+        let record = Record {
+            version: 1,
+            pid: pid.as_raw_nonzero().get() as u32,
+            start: identity(pid).expect("current process").start,
+        };
+        publish_record(&workspace, &id, &record).expect("publish identity");
+        mark_drain_failed(&workspace, &id).expect("persist failed drain");
+        cleanup_record(&workspace, &id, record.pid).expect("retain failed record");
+        assert!(read_record(&workspace, &id).expect("read record").is_some());
+        thaw(&workspace).expect("thaw does not erase failed drain");
+        let error = verify_quiescent(&workspace).expect_err("failed drain is not quiescent");
+        assert!(error.to_string().contains("drain remains unverified"));
+    }
+
     #[test]
     fn process_argument_validation_rejects_ambiguous_identity_and_commands() {
         assert!(validate_id("../other").is_err());
