@@ -298,8 +298,10 @@ pub(super) async fn observe(client: &Client, binding: &Binding) -> Result<Value>
         "broker trust boundary changed"
     );
     ensure!(
-        pod["metadata"]["labels"] == broker_manifest::labels(binding)
-            && pod["metadata"]["ownerReferences"] == expected["metadata"]["ownerReferences"],
+        super::policy::pod_labels_match(
+            &pod["metadata"]["labels"],
+            &broker_manifest::labels(binding)
+        ) && pod["metadata"]["ownerReferences"] == expected["metadata"]["ownerReferences"],
         "broker ownership changed"
     );
     Ok(pod)
@@ -444,7 +446,7 @@ pub(super) async fn authorize_with_config(
     })
 }
 pub(super) async fn validate_resources(client: &Client, binding: &Binding) -> Result<()> {
-    observe(client, binding).await?;
+    let pod = observe(client, binding).await?;
     let config = config(binding)?;
     let inventory = binding
         .inventory
@@ -457,7 +459,7 @@ pub(super) async fn validate_resources(client: &Client, binding: &Binding) -> Re
         policies["items"]
             .as_array()
             .context("invalid broker policy inventory")?,
-        &broker_manifest::labels(binding),
+        &pod["metadata"]["labels"],
         binding,
         &config,
         inventory,
@@ -517,7 +519,10 @@ pub(super) async fn delete(client: &Client, binding: &Binding) -> Result<()> {
     {
         ensure!(
             (binding.uid.is_empty() || pod["metadata"]["uid"] == binding.uid)
-                && pod["metadata"]["labels"] == broker_manifest::labels(binding),
+                && super::policy::pod_labels_match(
+                    &pod["metadata"]["labels"],
+                    &broker_manifest::labels(binding)
+                ),
             "refusing to stop replaced broker"
         );
         if !binding.uid.is_empty() && binding.response.is_some() {

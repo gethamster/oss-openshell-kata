@@ -80,6 +80,49 @@ fn brokered_guest_has_only_combined_exact_broker_principal() {
     assert!(broker_policy::validate_guest(&[p, broaden], &labels, &binding).is_err());
     assert_eq!(config.broker_namespace, "openshell-network");
 }
+
+#[test]
+fn pod_topology_labels_preserve_every_owned_binding_label() {
+    let b = binding();
+    for expected in [
+        broker_manifest::labels(&b),
+        broker_manifest::guest_labels(&b.sandbox_name, &b),
+    ] {
+        let mut observed = expected.clone();
+        observed["topology.kubernetes.io/region"] = json!("us-central1");
+        observed["topology.kubernetes.io/zone"] = json!("us-central1-a");
+        assert!(super::policy::pod_labels_match(&observed, &expected));
+        for key in expected.as_object().expect("labels").keys() {
+            let mut changed = observed.clone();
+            changed[key] = json!("other");
+            assert!(
+                !super::policy::pod_labels_match(&changed, &expected),
+                "changed {key}"
+            );
+            let mut missing = observed.clone();
+            missing.as_object_mut().expect("labels").remove(key);
+            assert!(
+                !super::policy::pod_labels_match(&missing, &expected),
+                "missing {key}"
+            );
+        }
+        observed["untrusted.example/extra"] = json!("true");
+        assert!(!super::policy::pod_labels_match(&observed, &expected));
+    }
+}
+
+#[test]
+fn topology_selected_additive_network_policy_is_rejected() {
+    let b = binding();
+    let mut labels = broker_manifest::labels(&b);
+    labels["topology.kubernetes.io/zone"] = json!("us-central1-a");
+    let expected = broker_manifest::network_policy(&b, &config(), &inventory()).expect("policy");
+    let extra = json!({"spec":{"podSelector":{"matchLabels":{"topology.kubernetes.io/zone":"us-central1-a"}},"policyTypes":["Egress"],"egress":[{}]}});
+    assert!(
+        broker_policy::validate_broker(&[expected, extra], &labels, &b, &config(), &inventory())
+            .is_err()
+    );
+}
 #[test]
 fn broker_additive_policy_cannot_allow_nodes_or_extra_resolvers() {
     let cfg = config();

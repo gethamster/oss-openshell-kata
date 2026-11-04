@@ -11,6 +11,19 @@ const BOOT: &str = "66666666-6666-4666-8666-666666666666";
 const CONTROLLER: &str = "77777777-7777-4777-8777-777777777777";
 const IMAGE: &str = "registry.example/guest@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+#[test]
+fn preboot_accepts_platform_topology_without_weakening_broker_identity() -> Result<()> {
+    let (config, mut guest, mut launch) = fixture()?;
+    for pod in [&mut guest, &mut launch.broker] {
+        pod["metadata"]["labels"]["topology.kubernetes.io/region"] = json!("us-central1");
+        pod["metadata"]["labels"]["topology.kubernetes.io/zone"] = json!("us-central1-a");
+    }
+    admission::derive(&config, &guest, &launch)?;
+    launch.broker["metadata"]["labels"]["openshell-kata.io/launch-nonce"] = json!(UID);
+    assert!(admission::derive(&config, &guest, &launch).is_err());
+    Ok(())
+}
+
 pub(super) fn fixture() -> Result<(config::Config, Value, admission::Launch)> {
     use sha2::{Digest, Sha256};
     let mut config: config::Config = serde_json::from_value(

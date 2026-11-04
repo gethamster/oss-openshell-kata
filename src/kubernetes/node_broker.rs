@@ -50,9 +50,13 @@ pub(crate) fn validate_node_broker_pod(
     let expected = node_broker_manifest(image, broker_namespace_uid, config, operator)?;
     broker_spec::validate(&actual["spec"], &expected["spec"])?;
     ensure!(
-        ["name", "namespace", "labels", "ownerReferences"]
+        ["name", "namespace", "ownerReferences"]
             .iter()
-            .all(|field| actual["metadata"][field] == expected["metadata"][field]),
+            .all(|field| actual["metadata"][field] == expected["metadata"][field])
+            && policy::pod_labels_match(
+                &actual["metadata"]["labels"],
+                &expected["metadata"]["labels"]
+            ),
         "node-observed broker ownership differs"
     );
     Ok(())

@@ -102,6 +102,25 @@ pub(super) fn require_owned(resource: &Value, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Preserve every binding label while accepting the two topology labels that
+/// Kubernetes admission adds to Pods. Callers still validate policies against
+/// all observed labels, including topology-selected additive policies.
+pub(super) fn pod_labels_match(observed: &Value, expected: &Value) -> bool {
+    let (Some(observed), Some(expected)) = (observed.as_object(), expected.as_object()) else {
+        return false;
+    };
+    expected
+        .iter()
+        .all(|(key, value)| observed.get(key) == Some(value))
+        && observed.iter().all(|(key, value)| {
+            expected.contains_key(key)
+                || (matches!(
+                    key.as_str(),
+                    "topology.kubernetes.io/region" | "topology.kubernetes.io/zone"
+                ) && value.as_str().is_some_and(|value| !value.is_empty()))
+        })
+}
+
 pub(super) fn check_namespace(observed: &Value, workspace: &str) -> Result<()> {
     namespace(workspace)?;
     ensure!(

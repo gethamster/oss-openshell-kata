@@ -228,8 +228,10 @@ pub(super) fn validate(
     );
     if let Some(binding) = &state.broker {
         ensure!(
-            observed.pod["metadata"]["labels"]
-                == broker_manifest::guest_labels(&state.name, binding),
+            policy::pod_labels_match(
+                &observed.pod["metadata"]["labels"],
+                &broker_manifest::guest_labels(&state.name, binding)
+            ),
             "brokered guest labels changed"
         );
         broker_policy::validate_guest(

@@ -48,7 +48,10 @@ fn validate(policies: &[Value], labels: &Value, expected: &Value) -> Result<()> 
 }
 pub(super) fn validate_guest(policies: &[Value], labels: &Value, binding: &Binding) -> Result<()> {
     ensure!(
-        *labels == broker_manifest::guest_labels(&binding.sandbox_name, binding),
+        policy::pod_labels_match(
+            labels,
+            &broker_manifest::guest_labels(&binding.sandbox_name, binding)
+        ),
         "guest generation labels differ"
     );
     validate(
@@ -65,7 +68,7 @@ pub(super) fn validate_broker(
     inventory: &crate::network::InfrastructureInventory,
 ) -> Result<()> {
     ensure!(
-        *labels == broker_manifest::labels(binding),
+        policy::pod_labels_match(labels, &broker_manifest::labels(binding)),
         "broker generation labels differ"
     );
     validate(
