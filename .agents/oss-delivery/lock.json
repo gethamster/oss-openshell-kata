@@ -1,13 +1,13 @@
 {
   "repository": "https://github.com/gethamster/oss-delivery",
-  "revision": "a683026752e57e988703349766fb02451a1971d0",
+  "revision": "54bcd7ed7b59c7ffd1a4cf57f179c92c0e95eaf2",
   "files": {
     ".agents/oss-delivery/AGENTS.md": {
-      "sha256": "43744154305fd6b498b976f8ab8c0e3deae06a5f59e63b3954dcbeda4cc1b323",
+      "sha256": "0de0ad3f7ed5dd64ba882f0d86fe9db3d3c9853b7283da76c56c9d143f24a089",
       "mode": 420
     },
     ".agents/skills/domain-language/SKILL.md": {
-      "sha256": "7b426b2585e3c27580ddfef6afa7b9cf6e7f86cef879c3cd1876e0eb0d0921c4",
+      "sha256": "0d6e10c694a8dd77da35f051266598d7cd510f6d74789d068258ddd5a4e727c2",
       "mode": 420
     },
     ".agents/skills/domain-language/agents/openai.yaml": {
@@ -23,7 +23,7 @@
       "mode": 420
     },
     ".agents/skills/incident-recovery/SKILL.md": {
-      "sha256": "8322de485be0b349380bafab2bfa3898c78c4d94c37e82378845d301ed30a021",
+      "sha256": "ee4d3bed07d6b1647fa56877ed182d8ba502a99c33daeb04226a8f47cc0e9906",
       "mode": 420
     },
     ".agents/skills/incident-recovery/agents/openai.yaml": {
@@ -35,7 +35,7 @@
       "mode": 420
     },
     ".agents/skills/incident-recovery/references/recovery.md": {
-      "sha256": "9916100475eb9636f094d86f205d55e823f242fbef946491736e10f5fe42094b",
+      "sha256": "61f352a2dfb783595f852104d83c2cd6cc4b525ad44f6d659d44ec4a182adc59",
       "mode": 420
     },
     ".agents/skills/interface-design/SKILL.md": {
@@ -139,7 +139,7 @@
       "mode": 420
     },
     ".agents/skills/release-efficiency/SKILL.md": {
-      "sha256": "7f6f5fd54ad99a57d244d77206d88e720be395f9dd828f67b5aa3f2f710aa295",
+      "sha256": "8b364abf9a05ff6cf0d2bb79103dc646d45a0d455b8140e27afc54f4c94db8e0",
       "mode": 420
     },
     ".agents/skills/release-efficiency/agents/openai.yaml": {
@@ -691,7 +691,7 @@
       "mode": 420
     },
     ".agents/skills/technical-documentation/SKILL.md": {
-      "sha256": "d95d91596f0bed86284b8d83d43e3b192f697e0f148298bd8350b3a0ed2e05d6",
+      "sha256": "a90462ad1befaefc6f371e71e50f2800b42988310945cdaf753211b84a1855a8",
       "mode": 420
     },
     ".agents/skills/technical-documentation/agents/openai.yaml": {
@@ -711,7 +711,7 @@
       "mode": 420
     },
     ".agents/skills/verified-delivery/SKILL.md": {
-      "sha256": "c743586d335886e691cc97768b6864b8707c8775c703fae34d9ce6546cd2ee8d",
+      "sha256": "30f3beda9ee41d283b073aee27a1982729b9b195ef6a579281f1d7263b70df10",
       "mode": 420
     },
     ".agents/skills/verified-delivery/agents/openai.yaml": {
@@ -719,11 +719,11 @@
       "mode": 420
     },
     ".agents/skills/verified-delivery/references/verification.md": {
-      "sha256": "cdaf0d1b580dacc64661ae1a6c12ea4d908c38a94e2d8677ab8f926746f9ac2c",
+      "sha256": "5ae72171a3ddf74450e059f9333c52a8f4a917b26daddaf13cb31be02cd41015",
       "mode": 420
     },
     ".agents/skills/work-coordination/SKILL.md": {
-      "sha256": "d15028a1471641a8689397588e69b71ac840455c01ebd25405210df45767d9e6",
+      "sha256": "469626a24f9990a007c1a3096d8a17b8f34a66e2f69585982caed1fd3bbf0710",
       "mode": 420
     },
     ".agents/skills/work-coordination/agents/openai.yaml": {

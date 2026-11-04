@@ -24,6 +24,12 @@ Solve the problem and ship the fix. Overthinking, speculative redesign, duplicat
 checks, and repeated reviews consume time and money without improving delivery.
 Use judgment to finish the requested work, not to invent more work.
 
+**Do not introduce delivery machinery without a current, concrete need.** Tests,
+scripts, gates, holds, adapters, migration helpers, and documentation all carry
+maintenance cost. Reuse what exists and remove superseded machinery with the
+behavior it served. Do not replace removed tests with meta-tests, deletion
+checks, a new framework, or an additional approval step.
+
 Make the smallest complete increment work locally with relevant checks, then
 push and release through the authorized path; repeat toward production. Honor
 explicitly narrower requests. A local result or progress update is not task
@@ -47,6 +53,9 @@ completion when production is requested, and creates no checkpoint or approval g
    if it adds no continuing value. Keep a regression only when it protects a
    meaningful contract or likely recurrence at reasonable maintenance cost.
    Preserve useful existing tests and required repository checks.
+   For removal-only work, inspect remaining callers and run the applicable
+   existing check once. Do not recreate deleted assertions elsewhere or
+   repeatedly reconsider an established removal decision without new evidence.
 4. **Smoke-test and evaluate.** Exercise the affected operation in the existing
    staging environment and run the relevant evals that exist. Compare observed
    behavior with the requested result. Do not build a new test framework or full
@@ -66,6 +75,10 @@ completion when production is requested, and creates no checkpoint or approval g
    Use clear successful tool results as evidence; investigate ambiguous outcomes
    instead of adding redundant readbacks solely to reconfirm success.
 
+For a System release-track request, use the current owning runbook and the user's
+authorized destination. See [Release-track completion](references/verification.md#release-track-completion)
+for evidence reuse and resource ownership; do not create extra stages or waits.
+
 Use [Checks and eval decisions](references/verification.md) when choosing proof,
 retaining a test, or deciding whether another check is warranted. If a normal
 fix is genuinely blocked by an unresolved incident or uncertain committed effect,
@@ -82,6 +95,12 @@ mandatory gate. Use a supported task-scoped option when permitted; changing
 persistent/global configuration still needs applicable authority. Report the
 source and impact accurately. After a denial, follow the host's retry rules;
 never change execution routes to evade it.
+
+Keep ownership of recoverable failures. Repair the cause, reconcile the original
+operation when effects are uncertain, and continue without asking the user to
+retry. A status such as "held" or "retry boundary" is not a completion result.
+Ask for user action only when a concrete permission, credential, or decision is
+missing; name that action and continue independent work.
 
 Report the fix, the smoke/eval result, and the shipped revision or exact blocker.
 Keep it short. Follow [workspace-cleanup](../workspace-cleanup/SKILL.md) for task

@@ -52,6 +52,11 @@ rewrite or create a glossary or documentation hierarchy merely to satisfy this
 skill. When code disagrees with intended policy, record the discrepancy rather
 than describing a defect as approved behavior.
 
+Remove instructions and duplicated explanations when their behavior or delivery
+machinery is retired. Preserve requested removal records and useful historical
+evidence without maintaining obsolete procedures or creating another report,
+documentation hierarchy, or validation pipeline.
+
 ## Regenerate and verify
 
 Follow [Documentation verification](references/documentation-verification.md)

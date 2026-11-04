@@ -49,6 +49,11 @@ Revalidate affected behavior and retain unchanged evidence where justified.
 Rebase or rewrite only where permitted; a force-with-lease option does not grant
 permission to rewrite someone else’s or protected history.
 
+Reuse each worker's valid checks and artifacts at integration. Do not repeat the
+same checks at every handoff or add another review or test loop because multiple
+agents contributed. Recheck only changed inputs, observed failures, or actual
+repository requirements.
+
 ## Coordinate shared environments
 
 Use [Shared service environments](references/shared-environments.md) when
@@ -72,6 +77,11 @@ Make completed work, unresolved findings, current handles, and the next action
 available to the receiving owner. Transfer responsibility for shared services
 before the current owner exits if consumers still need them. A handoff must not
 silently abandon active work or claim an unverified result is complete.
+
+When the user requests a removal log, retain it through integration with each
+removed issue's original Git attribution and counts. Combine worker entries
+without double-counting; keep the record in the agreed log, not a new registry,
+report generator, or validation pipeline.
 
 After integration or handoff, apply
 [workspace-cleanup](../workspace-cleanup/SKILL.md) to the resources no longer

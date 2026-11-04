@@ -2,7 +2,7 @@
 
 Read and apply the [shared contributor guide](.agents/oss-delivery/AGENTS.md)
 from [oss-delivery](https://github.com/gethamster/oss-delivery), pinned at
-`a683026752e57e988703349766fb02451a1971d0` in [.agents/oss-delivery/lock.json](.agents/oss-delivery/lock.json).
+`54bcd7ed7b59c7ffd1a4cf57f179c92c0e95eaf2` in [.agents/oss-delivery/lock.json](.agents/oss-delivery/lock.json).
 The complete pack is available locally in `.agents/skills/`; `.claude/skills/`
 contains regular-file entrypoints to the same instructions.
 

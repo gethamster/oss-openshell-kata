@@ -49,6 +49,17 @@ decide pass or fail, and ship. Do not turn a bounded fix into speculative
 engineering, permanent test infrastructure, or repeated review loops. Honor
 narrower requests and existing protections; do not ask again for granted authority.
 
+**Remove unnecessary machinery; do not replace it with process.** Do not add
+tests for deleted tests, recursive verification, speculative migration support,
+or fresh delivery gates. Once the requested outcome and applicable checks pass,
+merge and deliver.
+
+For System release-track work, follow the current owning
+[System runbook](https://github.com/gethamster/oss-system/blob/main/docs/release-tracks.md)
+and the user's authorized destination. Keep target lists, stage requirements,
+and observation policy there rather than duplicating them in shared guidance.
+Ordinary component publication and guidance-only changes retain their own endpoints.
+
 Local development is authorized without additional approval. Create and iterate
 installation-owned local services, isolated test databases, test users and agent
 principals, and disposable development credentials as needed to build and verify

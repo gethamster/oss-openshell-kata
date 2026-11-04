@@ -28,6 +28,11 @@ meaningful distinctions between concepts that merely have similar names. When
 repositories use different terms for the same integration, document the mapping
 rather than silently renaming their contracts.
 
+Describe status with the concrete operation, what is happening, and any action
+the user must take. Internal labels such as "held", "retry boundary", or "gate"
+do not explain a problem or justify handing recoverable work back to the user.
+Keep protocol identifiers precise while using plain language in user-facing copy.
+
 Use [Naming decisions](references/naming-decisions.md) for a new concept,
 ambiguous term, or inconsistent prose. Respect the codebase’s naming conventions
 and deliberate product names; use role names instead of person-specific

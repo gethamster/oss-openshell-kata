@@ -40,6 +40,10 @@ small bug fix. Remove it after verification when its continuing value is low.
 Keep a permanent test when it protects important behavior, likely recurrence,
 or a required contract without disproportionate maintenance.
 
+Delete tests and fixtures whose only purpose was to preserve removed behavior or
+obsolete delivery machinery. Do not replace them with tests for the deletion,
+recreate their assertions elsewhere, or add another verification layer.
+
 Do not add tests that mirror implementation shape, assert deleted files are
 absent without a behavioral reason, or preserve a one-off debugging procedure.
 Do not delete useful existing tests, weaken assertions, or skip required gates
@@ -53,6 +57,8 @@ required gate. Use existing evidence for unchanged inputs. Before another build,
 review, or test run, identify the changed input, failed behavior, or actual rule
 that makes it necessary. If none exists, deliver. New defects justify focused
 repair and affected rechecks, not restarting qualification of the whole product.
+Establish the smallest sufficient verification scope once. Do not recursively
+review, test, or requalify the verification work itself.
 
 When deployment is blocked, retain valid local proof and continue independent
 release work. Report the actual blocker; local success does not complete a
@@ -69,3 +75,22 @@ Confirm delivery at the requested endpoint: local files for a local request,
 a published version for a package, or the intended artifact/revision for a
 service deployment. Do not add an open-ended observation window as a release
 gate unless the requested incident or repository policy actually requires one.
+
+## Release-track completion
+
+The [System release runbook](https://github.com/gethamster/oss-system/blob/main/docs/release-tracks.md)
+owns the current supported targets, operational commands, and release policy.
+Follow it to the user's authorized destination. Do not copy target counts, fixed
+observation windows, or stage sequences into this shared skill, and do not add
+them merely because a release is in progress.
+
+Reuse the exact verified artifacts and still-valid evidence. Build only missing
+or incompatible packages; changing delivery tooling alone does not justify
+rebuilding or restarting qualification. Keep the existing release workflow,
+signed manifests, tenant lifecycle, and durable operation records.
+
+Recover through the original operation identity, repair the demonstrated cause,
+and rerun only the affected check. Continue authorized work rather than handing
+a recoverable interruption to the user as a manual retry. Preserve tenant
+ownership and private evidence, isolate changes from unrelated installations,
+and retire release-owned test resources through their existing lifecycle.

@@ -30,6 +30,11 @@ check to prove the affected operation. Keep independent work moving. If required
 evidence or access is unavailable, name that specific blocker; do not invent a
 new monitoring system, indefinite investigation, or unrelated cleanup project.
 
+Own recoverable failures through repair and continuation. Do not end the task
+with a generic "held" status or ask the user to retry an operation you can
+reconcile and resume. Request user action only for a concrete missing decision,
+permission, or capability that you cannot resolve within the authorized scope.
+
 Once the cause or operation state is established, return to
 [verified-delivery](../verified-delivery/SKILL.md) to smoke-test, decide, and ship.
 Additional observation is warranted only by the incident’s concrete risk or an
