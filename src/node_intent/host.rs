@@ -260,6 +260,11 @@ fn parse_interface_route(
         .as_str()
         .context("default gateway missing")?
         .parse()?;
+    crate::network::hosted_fence::parse_mac(&mac)?;
+    ensure!(
+        (gateway.is_private() || gateway.is_link_local()) && gateway != ip,
+        "invalid CNI default gateway"
+    );
     Ok((ip, mac, gateway))
 }
 

@@ -452,7 +452,11 @@ pub(super) fn require_preboot(guest: &Value) -> Result<()> {
         "gateway initialization requires a pending guest"
     );
     for key in ["containerStatuses", "initContainerStatuses"] {
-        if let Some(statuses) = guest["status"][key].as_array() {
+        let value = &guest["status"][key];
+        if !value.is_null() {
+            let statuses = value
+                .as_array()
+                .context("invalid guest process status inventory")?;
             ensure!(
                 statuses
                     .iter()
