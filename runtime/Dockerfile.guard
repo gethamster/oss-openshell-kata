@@ -21,7 +21,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 
 FROM registry.k8s.io/kubectl@sha256:63e5e76b746bb8b891a94968d380736c035e768dab0d56ddad1f50c750a4be39 AS kubectl
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates iproute2 util-linux \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates iproute2 util-linux python3 iputils-arping \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/bin/ /usr/local/bin/
 COPY --from=build /out/fence/ /opt/openshell-kata/
