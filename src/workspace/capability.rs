@@ -126,6 +126,8 @@ pub fn request_docker(workspace: &Workspace, args: &[String], compose: bool) -> 
 fn local_information(args: &[String], compose: bool) -> bool {
     args.is_empty()
         || matches!(args, [one] if one == "--help" || one == "-h" || one == "--version" || one == "-v" || (compose && one == "version"))
+        || matches!(args, [command, ..] if matches!(command.as_str(), "help" | "version"))
+        || matches!(args, [command, subcommand, ..] if !compose && command == "compose" && matches!(subcommand.as_str(), "help" | "version"))
         || matches!(args, [one, two] if !compose && one == "compose" && matches!(two.as_str(), "version" | "--help" | "-h"))
         || matches!(args, [_, help] if matches!(help.as_str(), "--help" | "-h"))
         || matches!(args, [group, _, help] if !compose
@@ -143,7 +145,11 @@ mod tests {
             (vec!["--version"], false, true),
             (vec!["compose", "version"], false, true),
             (vec!["info"], false, false),
-            (vec!["version"], false, false),
+            (vec!["version"], false, true),
+            (vec!["help"], false, true),
+            (vec!["help", "build"], false, true),
+            (vec!["compose", "help"], false, true),
+            (vec!["compose", "help", "build"], false, true),
             (vec!["version"], true, true),
             (vec!["compose", "up"], false, false),
             (vec!["run", "--help"], false, true),
