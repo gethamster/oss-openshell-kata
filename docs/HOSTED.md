@@ -65,6 +65,9 @@ digests. Bind the actual source, broker, controller and guard namespace UIDs to
 operator configuration or launch state. No namespace UID mirror label is needed.
 Network policies select exact namespace names and immutable Pod labels carrying
 the source namespace UID, sandbox identity and launch nonce.
+Pod validation also permits the platform-added `topology.kubernetes.io/region`
+and `topology.kubernetes.io/zone` labels. Required binding labels remain exact,
+and additive network-policy checks use the complete observed label set.
 
 This profile uses the local runtime's native TCP compiler. Rules must select
 all executables with `/**`, exact DNS names or global IP literals, explicit TCP

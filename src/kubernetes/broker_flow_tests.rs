@@ -56,6 +56,18 @@ fn complete_v2_proof_fixture_runs_with_explicit_child_environment() {
     let b = state.broker.as_ref().expect("broker");
     let now = kube::lease::now().expect("now");
     let mut pod = broker_manifest::guest_pod(&state);
+    pod["metadata"]["labels"]["topology.kubernetes.io/region"] = json!("us-central1");
+    pod["metadata"]["labels"]["topology.kubernetes.io/zone"] = json!("us-central1-a");
+    let broker_path = f.root.join("pod.json");
+    let mut broker: Value =
+        serde_json::from_slice(&std::fs::read(&broker_path).expect("broker")).expect("broker JSON");
+    broker["metadata"]["labels"]["topology.kubernetes.io/region"] = json!("us-central1");
+    broker["metadata"]["labels"]["topology.kubernetes.io/zone"] = json!("us-central1-a");
+    std::fs::write(
+        broker_path,
+        serde_json::to_vec(&broker).expect("broker JSON"),
+    )
+    .expect("broker fixture");
     pod["metadata"]["uid"] = guest["metadata"]["uid"].clone();
     pod["metadata"]["annotations"] = kube::lease::annotations(
         &state.sandbox_id,
