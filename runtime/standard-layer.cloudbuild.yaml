@@ -1,0 +1,24 @@
+# Run against a clean oss-openshell-kata checkout. All image inputs are pinned
+# image@sha256 references from one qualified System/OpenShell cohort.
+steps:
+  - id: thread
+    name: gcr.io/cloud-builders/docker@sha256:f772ab459889c67835bd959c2b9e9351f2c0752c4f989710ecda20c229f0733e
+    env: ['DOCKER_BUILDKIT=1']
+    args: ['build', '--platform=linux/amd64', '--file=runtime/Dockerfile.standard-layer', '--build-arg=BASE=${_THREAD_BASE}', '--build-arg=STANDARD_IMAGE=${_STANDARD_IMAGE}', '--tag=${_REPOSITORY}/thread-minion:${_TAG}', '.']
+  - id: workspace
+    name: gcr.io/cloud-builders/docker@sha256:f772ab459889c67835bd959c2b9e9351f2c0752c4f989710ecda20c229f0733e
+    waitFor: ['-']
+    env: ['DOCKER_BUILDKIT=1']
+    args: ['build', '--platform=linux/amd64', '--file=runtime/Dockerfile.standard-layer', '--build-arg=BASE=${_WORKSPACE_BASE}', '--build-arg=STANDARD_IMAGE=${_STANDARD_IMAGE}', '--tag=${_REPOSITORY}/team-workspace:${_TAG}', '.']
+images: ['${_REPOSITORY}/thread-minion:${_TAG}', '${_REPOSITORY}/team-workspace:${_TAG}']
+substitutions:
+  _REPOSITORY: ''
+  _TAG: ''
+  _THREAD_BASE: ''
+  _WORKSPACE_BASE: ''
+  _STANDARD_IMAGE: ''
+options:
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY
+  substitutionOption: MUST_MATCH
+timeout: 1800s

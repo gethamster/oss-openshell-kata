@@ -167,6 +167,31 @@ docker build -f runtime/Dockerfile.layer \
 that OCI artifact through the owning release pipeline and pass its digest via
 `--guest-image` on the adapter.
 
+For normal OpenShell runtimes, use `Dockerfile.standard-layer` with the ordinary
+System environment as `BASE` and the pinned `Dockerfile.standard` image as
+`STANDARD_IMAGE`. It retains the System binaries and inherited default command,
+adds the static helper and CLI wrappers, and runs as UID/GID 1000 with home
+`/sandbox`. It neither installs a daemon nor adds Kata initialization; a base
+that already contains either is rejected. The CLI executables copied from the
+standard image are static and run on the Ubuntu/Debian environment.
+
+Build from the repository root:
+
+```sh
+docker build -f runtime/Dockerfile.standard-layer \
+  --build-arg BASE=registry.example/thread-minion@sha256:... \
+  --build-arg STANDARD_IMAGE=registry.example/openshell-standard@sha256:... \
+  -t registry.example/thread-minion:standard .
+```
+
+`runtime/standard-layer.cloudbuild.yaml` builds and publishes the thread and team
+workspace candidates through the existing Cloud Build path. Supply `_THREAD_BASE`,
+`_WORKSPACE_BASE`, and `_STANDARD_IMAGE` as immutable references, plus `_REPOSITORY`
+and `_TAG`. Run it with the installation's explicit project, region, release
+builder service account, and source staging bucket. Record both returned image
+digests before selecting them in operator configuration. The build does not
+deploy or promote either image.
+
 Provision upstream containerd, ctr, nerdctl, nftables, iproute2, OpenSSH server,
 LVM/device-mapper tools, zstd, binutils, Python 3 and sudo before node setup.
 The host must expose nested `/dev/kvm` and cgroups v2. Run on the dedicated node

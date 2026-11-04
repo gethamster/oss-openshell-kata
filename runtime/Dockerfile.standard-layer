@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+# Both inputs must be approved immutable image@sha256 references. BASE is an
+# ordinary System environment, never a previously layered Kata guest.
+ARG BASE
+ARG STANDARD_IMAGE
+FROM ${STANDARD_IMAGE} AS tools
+
+FROM ${BASE}
+USER root
+RUN set -eux; \
+    ! command -v dockerd; \
+    test ! -e /usr/local/sbin/openshell-kata-init; \
+    test -x /usr/local/bin/system-agent; \
+    test -x /usr/local/bin/system-minion-entry; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      bash ca-certificates coreutils curl passwd; \
+    rm -rf /var/lib/apt/lists/*; \
+    group=$(getent group 1000 | cut -d: -f1 || true); \
+    if [ -z "$group" ]; then groupadd -g 1000 sandbox; \
+    elif [ "$group" != sandbox ]; then groupmod -n sandbox "$group"; fi; \
+    existing=$(getent passwd 1000 | cut -d: -f1 || true); \
+    if [ -z "$existing" ]; then \
+      useradd -u 1000 -g 1000 -d /sandbox -s /bin/bash sandbox; \
+    else \
+      if [ "$existing" != sandbox ]; then usermod -l sandbox "$existing"; fi; \
+      usermod -g 1000 -d /sandbox -s /bin/bash sandbox; \
+    fi; \
+    passwd -l sandbox; \
+    mkdir -p /sandbox /usr/libexec/openshell /usr/libexec/docker/cli-plugins; \
+    chown 1000:1000 /sandbox; \
+    test "$(id -u sandbox)" = 1000; \
+    test "$(id -g sandbox)" = 1000
+
+COPY --from=tools /usr/local/bin/kata-workspace /usr/local/bin/kata-workspace
+COPY --from=tools /usr/local/bin/docker /usr/local/bin/docker-compose /usr/local/bin/
+COPY --from=tools /usr/libexec/openshell/docker /usr/libexec/openshell/docker-compose /usr/libexec/openshell/
+COPY --from=tools /usr/libexec/openshell/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
+RUN test -x /usr/local/bin/system-agent \
+    && test -x /usr/local/bin/system-minion-entry \
+    && ! command -v dockerd
+ENV HOME=/sandbox
+USER 1000:1000
+WORKDIR /sandbox
