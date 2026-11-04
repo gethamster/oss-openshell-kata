@@ -39,7 +39,7 @@ USER root
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      openssh-server docker.io curl ca-certificates iproute2 musl python3; \
+      openssh-server docker.io curl git ca-certificates iproute2 musl python3; \
     rm -rf /var/lib/apt/lists/*; \
     existing=$(getent passwd 1000 | cut -d: -f1 || true); \
     if [ -n "$existing" ] && [ "$existing" != sandbox ]; then \
@@ -66,4 +66,16 @@ RUN chmod 755 /usr/local/sbin/openshell-kata-init /usr/local/bin/kata-workspace 
     && ln -s /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose \
     && test -x /usr/sbin/sshd && command -v dockerd && command -v curl \
     && docker compose version && docker-compose version
+USER 1000:1000
+RUN set -eux; \
+    test "$(id -u)" = 1000; \
+    directory=$(mktemp -d /sandbox/.git-image-smoke.XXXXXX); \
+    trap 'rm -rf "$directory"' EXIT; \
+    git -C "$directory" init --quiet; \
+    printf 'workspace image smoke\n' > "$directory/check.txt"; \
+    git -C "$directory" add check.txt; \
+    git -C "$directory" -c user.name=ImageSmoke -c user.email=image-smoke@example.invalid \
+      commit --quiet -m 'Verify workspace Git'; \
+    test -z "$(git -C "$directory" status --porcelain)"
+USER root
 ENTRYPOINT ["/usr/local/sbin/openshell-kata-init"]
