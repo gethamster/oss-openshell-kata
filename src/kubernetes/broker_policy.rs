@@ -46,7 +46,12 @@ fn validate(policies: &[Value], labels: &Value, expected: &Value) -> Result<()> 
     ensure!(ingress && egress, "bidirectional network isolation missing");
     Ok(())
 }
-pub(super) fn validate_guest(policies: &[Value], labels: &Value, binding: &Binding) -> Result<()> {
+pub(super) fn validate_guest(
+    policies: &[Value],
+    labels: &Value,
+    binding: &Binding,
+    control_namespace: &str,
+) -> Result<()> {
     ensure!(
         policy::pod_labels_match(
             labels,
@@ -57,7 +62,7 @@ pub(super) fn validate_guest(policies: &[Value], labels: &Value, binding: &Bindi
     validate(
         policies,
         labels,
-        &broker_manifest::guest_policy(&binding.sandbox_name, "unused", binding),
+        &broker_manifest::guest_policy(&binding.sandbox_name, "unused", binding, control_namespace),
     )
 }
 pub(super) fn validate_broker(

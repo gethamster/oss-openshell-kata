@@ -49,8 +49,13 @@ pub(super) fn configmap(
         json!({"apiVersion":"v1","kind":"ConfigMap","metadata":meta,"immutable":true,"data":{key:serde_json::to_string(value)?}}),
     )
 }
-pub(super) fn guest_policy(name: &str, namespace: &str, binding: &Binding) -> Value {
-    let mut p = manifest::network_policy(name, namespace, super::policy::DEFAULT_CONTROL_NAMESPACE);
+pub(super) fn guest_policy(
+    name: &str,
+    namespace: &str,
+    binding: &Binding,
+    control_namespace: &str,
+) -> Value {
+    let mut p = manifest::network_policy(name, namespace, control_namespace);
     p["metadata"]["labels"] = guest_labels(name, binding);
     p["spec"]["egress"] = json!([{"to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":binding.namespace}},"podSelector":{"matchLabels":labels(binding)}}],"ports":[{"protocol":"TCP","port":3128}]}]);
     p

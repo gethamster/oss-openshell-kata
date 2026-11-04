@@ -114,7 +114,7 @@ fn complete_v2_proof_fixture_runs_with_explicit_child_environment() {
         ),
         (
             "guest-policies.json",
-            json!({"items":[broker_manifest::guest_policy(&state.name,&state.namespace,b)]}),
+            json!({"items":[broker_manifest::guest_policy(&state.name,&state.namespace,b, kube::policy::DEFAULT_CONTROL_NAMESPACE)]}),
         ),
         (
             "broker-policies.json",
@@ -384,7 +384,12 @@ fn guard_composition_requires_both_exact_ready_containers_and_no_host_namespaces
 fn network_peers_bind_full_generation_labels_and_exact_namespace_names() {
     let b = binding();
     let labels = broker_manifest::guest_labels(&b.sandbox_name, &b);
-    let p = broker_manifest::guest_policy(&b.sandbox_name, &b.source_namespace, &b);
+    let p = broker_manifest::guest_policy(
+        &b.sandbox_name,
+        &b.source_namespace,
+        &b,
+        kube::policy::DEFAULT_CONTROL_NAMESPACE,
+    );
     assert_eq!(
         p["spec"]["egress"][0]["to"][0]["namespaceSelector"]["matchLabels"],
         json!({"kubernetes.io/metadata.name":"openshell-network"})
@@ -397,7 +402,13 @@ fn network_peers_bind_full_generation_labels_and_exact_namespace_names() {
         let mut missing = labels.clone();
         missing.as_object_mut().expect("labels").remove(key);
         assert!(
-            kube::broker_policy::validate_guest(std::slice::from_ref(&p), &missing, &b).is_err(),
+            kube::broker_policy::validate_guest(
+                std::slice::from_ref(&p),
+                &missing,
+                &b,
+                kube::policy::DEFAULT_CONTROL_NAMESPACE
+            )
+            .is_err(),
             "accepted missing {key}"
         );
     }
