@@ -18,7 +18,7 @@ RUN set -eux; \
     test -x /usr/local/bin/system-minion-entry; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      bash ca-certificates coreutils curl passwd musl; \
+      bash ca-certificates coreutils curl passwd musl python3; \
     rm -rf /var/lib/apt/lists/*; \
     group=$(getent group 1000 | cut -d: -f1 || true); \
     if [ -z "$group" ]; then groupadd -g 1000 sandbox; \
