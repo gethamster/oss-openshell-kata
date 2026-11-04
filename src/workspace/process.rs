@@ -1,5 +1,5 @@
 use super::Workspace;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::Dir;
 use serde::{Deserialize, Serialize};
@@ -99,7 +99,7 @@ pub async fn run_child(workspace: &Workspace, id: &str, command: &str) -> Result
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (workspace, command);
-        bail!("workspace process control requires Linux")
+        anyhow::bail!("workspace process control requires Linux")
     }
 }
 
@@ -160,7 +160,7 @@ pub fn kill(workspace: &Workspace, id: &str) -> Result<()> {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = record;
-        bail!("workspace process control requires Linux")
+        anyhow::bail!("workspace process control requires Linux")
     }
 }
 
