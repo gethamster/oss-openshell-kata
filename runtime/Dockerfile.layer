@@ -19,12 +19,17 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release --locked --bin kata-workspace \
     && install -D target/release/kata-workspace /out/kata-workspace
 
+# Debian's docker.io package does not supply the Compose CLI plugin. Carry the
+# same independently packaged plugin as normal sandboxes, without another daemon.
+FROM alpine:3.23@sha256:ff7f0c727dd796aa36787bfcd9a64bf35a6ce72a73451b3359fde849b6703d63 AS compose
+RUN apk add --no-cache docker-cli-compose
+
 FROM ${BASE}
 USER root
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      openssh-server docker.io curl ca-certificates iproute2; \
+      openssh-server docker.io curl ca-certificates iproute2 musl; \
     rm -rf /var/lib/apt/lists/*; \
     existing=$(getent passwd 1000 | cut -d: -f1 || true); \
     if [ -n "$existing" ] && [ "$existing" != sandbox ]; then \
@@ -44,8 +49,11 @@ RUN set -eux; \
     chown 1000:1000 /sandbox; \
     test "$(id -u sandbox)" = 1000
 COPY --from=helper /out/kata-workspace /usr/local/bin/kata-workspace
+COPY --from=compose /usr/libexec/docker/cli-plugins/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
 COPY runtime/guest-init.sh /usr/local/sbin/openshell-kata-init
 COPY runtime/sshd_config /etc/ssh/openshell-kata.conf
 RUN chmod 755 /usr/local/sbin/openshell-kata-init /usr/local/bin/kata-workspace \
-    && test -x /usr/sbin/sshd && command -v dockerd && command -v curl
+    && ln -s /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose \
+    && test -x /usr/sbin/sshd && command -v dockerd && command -v curl \
+    && docker compose version && docker-compose version
 ENTRYPOINT ["/usr/local/sbin/openshell-kata-init"]

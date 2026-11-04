@@ -152,7 +152,7 @@ The native guest image uses `Dockerfile.local-guest`, whose initializer is
 `guest-init.sh`; the hosted image uses a different initializer.
 
 `Dockerfile.layer` turns any Ubuntu or Debian based environment image into an
-admissible native guest. It installs OpenSSH server, Docker, curl, CA
+admissible native guest. It installs OpenSSH server, Docker with the Compose CLI plugin, curl, CA
 certificates and iproute2, makes uid 1000 the `sandbox` user with home
 `/sandbox` and no password (guest SSH stays key-only) (renaming an existing uid 1000 account, such as
 Ubuntu's `ubuntu`), and adds `guest-init.sh`, `sshd_config` and a static
