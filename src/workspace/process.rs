@@ -264,6 +264,7 @@ fn mark_cancelled(workspace: &Workspace, id: &str) -> Result<()> {
 
 // Retain explicit failure evidence: an uncertain drain must never look like
 // an idle source after the controller exits or the transport reconnects.
+#[cfg(target_os = "linux")]
 fn mark_drain_failed(workspace: &Workspace, id: &str) -> Result<()> {
     let directory = process_directory(workspace)?;
     let mut options = super::files::private_file_options();

@@ -70,9 +70,16 @@ This image does not change the adapter's Kata-only compute contract.
 
 `kata-workspace capability <command-uuid>` returns that command's request or
 `null`; `capabilities` lists pending requests and `capability-ack <uuid>` removes
-one. A helper-managed command is interrupted as a group before status 125 is
-returned. `hold <uuid>` keeps an interrupted owner workload available for file
-transfer. `quiesce` blocks new helper commands, stops managed groups, and refuses
+one. A helper-managed command and its descendants are interrupted before status
+125 is returned. Cancellation publishes a durable request to the command's
+controller. The controller retains orphaned descendants as a Linux subreaper,
+signals only its own unreaped children, and waits for all of them to exit. It
+requires neither pidfds nor process-group signals, which normal OpenShell
+workloads prohibit. A failed drain retains evidence and prevents a successful
+quiescence check.
+
+`hold <uuid>` keeps an interrupted owner workload available for file transfer.
+`quiesce` blocks new helper commands, stops managed descendants, and refuses
 transfer preparation while an untracked live process remains; `thaw` permits
 commands after a failed move.
 
