@@ -7,6 +7,15 @@ controls separately. No cloud provider API is required by this launcher.
 Select the hosted profile with `--runtime-profile kubernetes`, an immutable
 `--guest-image repository@sha256:...`, a private `--guest-network-cidr`, an
 absolute `--recovery-dir`, and `--lifecycle /usr/local/bin/kata-kubernetes`.
+Repeat `--additional-guest-image repository@sha256:...` to admit operator-pinned
+owner images alongside the default image. Every admitted image uses the same
+two-vCPU, 4-GiB resource profile and network ceiling. The authenticated sandbox
+template selects only an admitted digest; workload inputs cannot alter the
+allowlist or runtime settings. Lifecycle and proof checks use that selected
+image. Recovery retains the original image while it remains admitted, even if
+the default changes; removing it retires that sandbox rather than rebinding its
+storage to another image.
+
 The adapter passes the exact guest range to the launcher as
 `OPENSHELL_KATA_GUEST_NETWORK_CIDR`; absent or public ranges fail closed.
 The operator may select `OPENSHELL_KATA_KUBE_CONTEXT` and

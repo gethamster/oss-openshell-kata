@@ -161,7 +161,11 @@ impl Driver {
                 let operator = crate::kubernetes::HostedNetworkConfig::load(path)?;
                 crate::hosted::validate_brokered_request(
                     sandbox,
-                    self.config.guest_image.as_deref().unwrap_or(""),
+                    self.config
+                        .for_sandbox(sandbox)
+                        .guest_image
+                        .as_deref()
+                        .unwrap_or(""),
                     &operator.operator_ceiling,
                 )
             })
@@ -190,7 +194,8 @@ impl Driver {
         }
         for retained in &recovered.admitted {
             let id = SandboxId::parse(&retained.sandbox.id)?;
-            guest::lifecycle(&self.config, "stop", &id).await?;
+            let config = self.config.for_sandbox(&retained.sandbox);
+            guest::lifecycle(&config, "stop", &id).await?;
         }
         let mut registry = self.registry.write().await;
         for retained in recovered.admitted {
@@ -606,6 +611,131 @@ impl c::compute_driver_server::ComputeDriver for Driver {
 #[cfg(test)]
 mod watch_tests {
     use super::*;
+
+    #[test]
+    fn hosted_network_uses_the_selected_owner_image_and_keeps_the_operator_ceiling()
+    -> anyhow::Result<()> {
+        use clap::Parser;
+        let root = tempfile::tempdir()?;
+        let network_path = root.path().join("network.json");
+        let ceiling = crate::network::NetworkPolicy {
+            tcp_allow: vec![crate::network::Endpoint {
+                host: "registry.npmjs.org".into(),
+                port: 443,
+            }],
+            ..Default::default()
+        };
+        let operator = serde_json::json!({
+            "version":1,"broker_namespace":"openshell-network",
+            "broker_namespace_uid":"ea3293cf-4e1c-49a1-b558-ceba087503e6",
+            "operator_ceiling":ceiling,"baseline_denied_cidrs":[],
+            "protected_hostname_suffixes":[],"authorization_lease_secs":30,
+            "resolver_namespace_labels":{"kubernetes.io/metadata.name":"kube-system"},
+            "resolver_pod_labels":{"k8s-app":"kube-dns"},
+            "resolver_nameservers":["10.96.0.10"],
+            "guard_namespace":"kata-system",
+            "guard_namespace_uid":"6d62883f-fcb5-4b5e-a250-aaea50eeaf41",
+            "guard_client_tls_config_file":"/private/guard.json",
+            "inventory_file":"/private/inventory.json"
+        });
+        std::fs::write(&network_path, serde_json::to_vec(&operator)?)?;
+        let mut config = Config::parse_from([
+            "openshell-kata",
+            "--socket",
+            "/private/adapter.sock",
+            "--gateway-ca",
+            "/private/ca",
+            "--lifecycle",
+            "/private/lifecycle",
+            "--runtime-profile",
+            "kubernetes",
+            "--guest-network-cidr",
+            "10.176.0.0/16",
+            "--recovery-dir",
+            "/private/registry",
+        ]);
+        config.guest_image = Some(format!("registry.example/guest@sha256:{}", "a".repeat(64)));
+        let owner = format!("registry.example/team-workspace@sha256:{}", "b".repeat(64));
+        config.additional_guest_images = vec![owner.clone()];
+        config.recovery_dir = Some(root.path().join("registry"));
+        config.hosted_network_config = Some(network_path);
+        config.validate()?;
+        let driver = Driver::new(Arc::new(config))?;
+        let mut sandbox = c::DriverSandbox {
+            id: "owner-sandbox".into(),
+            workspace: "tenant-a".into(),
+            spec: Some(c::DriverSandboxSpec {
+                template: Some(c::DriverSandboxTemplate {
+                    image: owner,
+                    ..Default::default()
+                }),
+                policy: Some(crate::proto::openshell::sandbox::v1::SandboxPolicy {
+                    version: 1,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            driver.hosted_network_for(&sandbox)?,
+            Some(crate::network::NetworkPolicy::default())
+        );
+        let native = sandbox
+            .spec
+            .as_mut()
+            .expect("spec")
+            .policy
+            .as_mut()
+            .expect("policy");
+        native.network_policies.insert(
+            "npm".into(),
+            crate::proto::openshell::sandbox::v1::NetworkPolicyRule {
+                binaries: vec![crate::proto::openshell::sandbox::v1::NetworkBinary {
+                    path: "/**".into(),
+                }],
+                endpoints: vec![crate::proto::openshell::sandbox::v1::NetworkEndpoint {
+                    host: "registry.npmjs.org".into(),
+                    port: 443,
+                    protocol: "tcp".into(),
+                    tls: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        driver.config.validate_request(&sandbox)?;
+        assert_eq!(driver.hosted_network_for(&sandbox)?, Some(ceiling));
+        sandbox
+            .spec
+            .as_mut()
+            .expect("spec")
+            .policy
+            .as_mut()
+            .expect("policy")
+            .network_policies
+            .get_mut("npm")
+            .expect("rule")
+            .endpoints[0]
+            .host = "github.com".into();
+        assert!(
+            driver.hosted_network_for(&sandbox).is_err(),
+            "owner cannot widen network authority"
+        );
+        sandbox
+            .spec
+            .as_mut()
+            .expect("spec")
+            .template
+            .as_mut()
+            .expect("template")
+            .image = format!("registry.example/foreign@sha256:{}", "c".repeat(64));
+        assert!(
+            driver.hosted_network_for(&sandbox).is_err(),
+            "foreign images remain rejected"
+        );
+        Ok(())
+    }
 
     fn observation(instance: &str, condition: &str) -> c::WatchSandboxesEvent {
         c::WatchSandboxesEvent {

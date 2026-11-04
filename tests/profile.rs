@@ -371,7 +371,7 @@ fn operator_image_allowlist_admits_only_pinned_templates_under_one_vm_profile() 
     config.runtime_profile = openshell_kata::config::RuntimeProfile::Kubernetes;
     assert!(
         config.validate().is_err(),
-        "additional images are a local VM profile feature"
+        "hosted runtime cannot use a local VM policy"
     );
     Ok(())
 }
