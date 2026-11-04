@@ -106,7 +106,7 @@ pub async fn run_child(workspace: &Workspace, id: &str, command: &str) -> Result
 /// Publish cancellation for the exact retained controller.
 ///
 /// # Errors
-/// Rejects forged/stale process identities, unsupported hosts and signal failures.
+/// Rejects forged/stale process identities, unsupported hosts and cancellation-record failures.
 pub fn kill(workspace: &Workspace, id: &str) -> Result<()> {
     validate_id(id)?;
     let record = match read_record(workspace, id)? {
@@ -376,7 +376,7 @@ fn frozen(workspace: &Workspace) -> Result<bool> {
     }
 }
 
-/// Stop helper-managed process groups and prevent subsequent helper launches.
+/// Stop helper-managed descendants and prevent subsequent helper launches.
 pub async fn quiesce(workspace: &Workspace) -> Result<()> {
     let mut options = super::files::private_file_options();
     options.write(true).create_new(true);

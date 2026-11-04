@@ -8,6 +8,11 @@ use rustix::{
 use std::{io::Read, process::Stdio, time::Duration};
 
 pub(super) async fn run(workspace: &Workspace, id: &str, command: &[String]) -> Result<i32> {
+    // Install a handler even when a launcher inherited SIGCHLD=SIG_IGN.
+    // Otherwise Linux may auto-reap children and make numeric PIDs reusable.
+    // Listening for SIGCHLD does not register any child with Tokio's reaper.
+    let _child_notifications =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())?;
     // This dedicated controller never registers children with Tokio's reaper.
     // Until this function calls wait, each direct child PID remains reserved
     // by the kernel, including after exit. No other thread reaps these children.
