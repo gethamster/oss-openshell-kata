@@ -119,14 +119,12 @@ pub(super) async fn network(config: &Config, path: &Path) -> Result<Network> {
         std::process::id(),
         file.as_raw_fd()
     ));
-    let (addresses, routes, neighbors) = tokio::try_join!(
-        client::ip(&pinned, config, &["address", "show", "dev", "eth0"]),
-        client::ip(&pinned, config, &["route", "show", "default"]),
-        // iproute2 omits the dev field when filtered by dev. Observe it and
-        // independently require eth0 rather than trusting an omitted identity.
-        client::ip(&pinned, config, &["neigh", "show"])
-    )?;
-    let observed = parse_network(&addresses, &routes, &neighbors)?;
+    let observed = observe_network(config, &pinned).await?;
+    let after = std::fs::metadata(path)?;
+    ensure!(
+        after.dev() == metadata.dev() && after.ino() == metadata.ino(),
+        "CNI namespace changed during observation"
+    );
     Ok(Network {
         _namespace: file,
         ip: observed.0,
@@ -135,11 +133,94 @@ pub(super) async fn network(config: &Config, path: &Path) -> Result<Network> {
         gateway_mac: observed.3,
     })
 }
+async fn network_snapshot(config: &Config, namespace: &Path) -> Result<(Value, Value, Value)> {
+    tokio::try_join!(
+        client::ip(namespace, config, &["address", "show", "dev", "eth0"]),
+        client::ip(namespace, config, &["route", "show", "default"]),
+        client::ip(namespace, config, &["neigh", "show"])
+    )
+}
+
+pub(super) async fn observe_network(
+    config: &Config,
+    namespace: &Path,
+) -> Result<(Ipv4Addr, String, Ipv4Addr, String)> {
+    let (addresses, routes, neighbors) = network_snapshot(config, namespace).await?;
+    let initial = parse_network(&addresses, &routes, &neighbors);
+    if initial.is_ok() || config.arping_path.is_none() {
+        return initial;
+    }
+    let before = parse_interface_route(&addresses, &routes)?;
+    let matching = neighbors
+        .as_array()
+        .context("gateway neighbor inventory missing")?
+        .iter()
+        .filter(|entry| entry["dst"] == before.2.to_string() && entry["dev"] == "eth0")
+        .collect::<Vec<_>>();
+    let missing = matching.is_empty()
+        || (matching.len() == 1
+            && matching[0]["lladdr"].is_null()
+            && matching[0]["state"].as_array().is_some_and(|states| {
+                !states.is_empty()
+                    && states
+                        .iter()
+                        .all(|state| matches!(state.as_str(), Some("INCOMPLETE" | "FAILED")))
+            }));
+    if !missing {
+        return initial;
+    }
+    client::resolve_gateway(namespace, config, before.2).await?;
+    let (after_addresses, after_routes, after_neighbors) =
+        network_snapshot(config, namespace).await?;
+    ensure!(
+        parse_interface_route(&after_addresses, &after_routes)? == before
+            && after_addresses[0]["ifindex"] == addresses[0]["ifindex"],
+        "CNI interface or default route changed during gateway resolution"
+    );
+    parse_network(&after_addresses, &after_routes, &after_neighbors)
+}
+
 pub(super) fn parse_network(
     addresses: &Value,
     routes: &Value,
     neighbors: &Value,
 ) -> Result<(Ipv4Addr, String, Ipv4Addr, String)> {
+    let (ip, mac, gateway) = parse_interface_route(addresses, routes)?;
+    let neighbors = neighbors
+        .as_array()
+        .context("gateway neighbor inventory missing")?
+        .iter()
+        .filter(|n| {
+            n["dst"].as_str().is_some_and(|v| v == gateway.to_string()) && n["dev"] == "eth0"
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        neighbors.len() == 1,
+        "exact prepopulated gateway neighbor required"
+    );
+    let neighbor = neighbors[0];
+    let states = neighbor["state"]
+        .as_array()
+        .context("gateway neighbor state missing")?;
+    ensure!(
+        !states.is_empty()
+            && states.iter().all(|v| matches!(
+                v.as_str(),
+                Some("PERMANENT" | "REACHABLE" | "STALE" | "DELAY" | "PROBE" | "NOARP")
+            )),
+        "unresolved gateway neighbor prohibited"
+    );
+    let gateway_mac = neighbor["lladdr"]
+        .as_str()
+        .context("gateway MAC missing")?
+        .to_owned();
+    Ok((ip, mac, gateway, gateway_mac))
+}
+
+fn parse_interface_route(
+    addresses: &Value,
+    routes: &Value,
+) -> Result<(Ipv4Addr, String, Ipv4Addr)> {
     let interfaces = addresses
         .as_array()
         .context("interface inventory missing")?;
@@ -179,35 +260,12 @@ pub(super) fn parse_network(
         .as_str()
         .context("default gateway missing")?
         .parse()?;
-    let neighbors = neighbors
-        .as_array()
-        .context("gateway neighbor inventory missing")?
-        .iter()
-        .filter(|n| {
-            n["dst"].as_str().is_some_and(|v| v == gateway.to_string()) && n["dev"] == "eth0"
-        })
-        .collect::<Vec<_>>();
+    crate::network::hosted_fence::parse_mac(&mac)?;
     ensure!(
-        neighbors.len() == 1,
-        "exact prepopulated gateway neighbor required"
+        (gateway.is_private() || gateway.is_link_local()) && gateway != ip,
+        "invalid CNI default gateway"
     );
-    let neighbor = neighbors[0];
-    let states = neighbor["state"]
-        .as_array()
-        .context("gateway neighbor state missing")?;
-    ensure!(
-        !states.is_empty()
-            && states.iter().all(|v| matches!(
-                v.as_str(),
-                Some("PERMANENT" | "REACHABLE" | "STALE" | "DELAY" | "PROBE" | "NOARP")
-            )),
-        "unresolved gateway neighbor prohibited"
-    );
-    let gateway_mac = neighbor["lladdr"]
-        .as_str()
-        .context("gateway MAC missing")?
-        .to_owned();
-    Ok((ip, mac, gateway, gateway_mac))
+    Ok((ip, mac, gateway))
 }
 
 pub(super) fn publish(intent: &HostedFenceIntent) -> Result<()> {

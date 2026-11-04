@@ -444,3 +444,29 @@ pub(super) fn stable_broker(before: &Value, after: &Value) -> bool {
         && before["status"]["podIP"] == after["status"]["podIP"]
         && before["status"]["containerStatuses"] == after["status"]["containerStatuses"]
 }
+
+/// Initialization may only precede every guest process in the guarded runtime.
+pub(super) fn require_preboot(guest: &Value) -> Result<()> {
+    ensure!(
+        guest["status"]["phase"].is_null() || guest["status"]["phase"] == "Pending",
+        "gateway initialization requires a pending guest"
+    );
+    for key in ["containerStatuses", "initContainerStatuses"] {
+        let value = &guest["status"][key];
+        if !value.is_null() {
+            let statuses = value
+                .as_array()
+                .context("invalid guest process status inventory")?;
+            ensure!(
+                statuses
+                    .iter()
+                    .all(|status| status["state"]["running"].is_null()
+                        && status["state"]["terminated"].is_null()
+                        && status["started"] != true
+                        && status["ready"] != true),
+                "guest process already started before gateway initialization"
+            );
+        }
+    }
+    Ok(())
+}

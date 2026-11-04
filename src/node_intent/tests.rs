@@ -477,3 +477,123 @@ fn unrendered_broker_pod_fields_cannot_acquire_preboot_authority() -> Result<()>
     }
     Ok(())
 }
+
+#[test]
+fn neighbor_initialization_requires_a_guest_that_has_never_started() -> Result<()> {
+    let (_, mut guest, _) = fixture()?;
+    admission::require_preboot(&guest)?;
+    guest["status"]["phase"] = json!("Pending");
+    admission::require_preboot(&guest)?;
+    for phase in ["Running", "Succeeded", "Failed"] {
+        guest["status"]["phase"] = json!(phase);
+        assert!(admission::require_preboot(&guest).is_err());
+    }
+    guest["status"]["phase"] = json!("Pending");
+    for group in ["containerStatuses", "initContainerStatuses"] {
+        for state in [json!({"running":{}}), json!({"terminated":{"exitCode":0}})] {
+            guest["status"][group] = json!([{"state":state}]);
+            assert!(admission::require_preboot(&guest).is_err());
+        }
+        guest["status"][group] = Value::Null;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn optional_arp_initialization_is_bounded_and_rereads_exact_network_identity() -> Result<()> {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let root = tempfile::tempdir()?;
+    let (mut config, _, _) = fixture()?;
+    config.nsenter_path = root.path().join("nsenter");
+    config.ip_path = root.path().join("ip");
+    let arp = root.path().join("arping");
+    let address = json!([{"ifname":"eth0","ifindex":2,"address":"02:00:00:00:00:01","addr_info":[{"family":"inet","local":"10.4.5.6"}]}]);
+    let route = json!([{"dst":"default","gateway":"169.254.4.6","dev":"eth0"}]);
+    let neighbor = json!([{"dst":"169.254.4.6","dev":"eth0","lladdr":"02:00:00:00:00:02","state":["REACHABLE"]}]);
+    for (name, value) in [
+        ("address", &address),
+        ("route", &route),
+        ("neighbor", &neighbor),
+        ("after-address", &address),
+        ("after-route", &route),
+    ] {
+        fs::write(root.path().join(name), serde_json::to_vec(value)?)?;
+    }
+    let quoted = crate::config::shell_quote(root.path().to_str().expect("temp path"));
+    fs::write(
+        &config.nsenter_path,
+        format!(
+            r#"#!/bin/sh
+root={quoted}
+case "$3" in
+*/arping)
+    printf '%s\n' "$@" > "$root/calls"
+    [ ! -f "$root/fail" ] || exit 1
+    touch "$root/resolved" ;;
+*/ip)
+    case "$*" in
+    *'address show dev eth0') if [ -f "$root/resolved" ]; then cat "$root/after-address"; else cat "$root/address"; fi ;;
+    *'route show default') if [ -f "$root/resolved" ]; then cat "$root/after-route"; else cat "$root/route"; fi ;;
+    *'neigh show') if [ -f "$root/resolved" ]; then cat "$root/neighbor"; else printf '[]'; fi ;;
+    *) exit 4 ;;
+    esac ;;
+*) exit 3 ;;
+esac
+"#
+        ),
+    )?;
+    fs::set_permissions(&config.nsenter_path, fs::Permissions::from_mode(0o700))?;
+    let namespace = std::path::Path::new("/proc/123/fd/4");
+    assert!(host::observe_network(&config, namespace).await.is_err());
+    assert!(
+        !root.path().join("calls").exists(),
+        "default performs no ARP action"
+    );
+    config.arping_path = Some(arp.clone());
+    let observed = host::observe_network(&config, namespace).await?;
+    assert_eq!(observed.2, "169.254.4.6".parse::<std::net::Ipv4Addr>()?);
+    assert_eq!(observed.3, "02:00:00:00:00:02");
+    assert_eq!(
+        fs::read_to_string(root.path().join("calls"))?,
+        format!(
+            "--net=/proc/123/fd/4\n--\n{}\n-I\neth0\n-c\n1\n-w\n2\n169.254.4.6\n",
+            arp.display()
+        )
+    );
+    fs::remove_file(root.path().join("calls"))?;
+    host::observe_network(&config, namespace).await?;
+    assert!(
+        !root.path().join("calls").exists(),
+        "resolved neighbors need no initialization"
+    );
+    fs::remove_file(root.path().join("resolved"))?;
+    fs::write(root.path().join("fail"), b"")?;
+    assert!(host::observe_network(&config, namespace).await.is_err());
+    fs::remove_file(root.path().join("fail"))?;
+    let mut changed = address.clone();
+    changed[0]["ifindex"] = json!(3);
+    fs::write(
+        root.path().join("after-address"),
+        serde_json::to_vec(&changed)?,
+    )?;
+    assert!(
+        host::observe_network(&config, namespace).await.is_err(),
+        "replacement interface rejected"
+    );
+    fs::remove_file(root.path().join("resolved"))?;
+    fs::write(
+        root.path().join("after-address"),
+        serde_json::to_vec(&address)?,
+    )?;
+    let mut changed = route.clone();
+    changed[0]["gateway"] = json!("169.254.4.7");
+    fs::write(
+        root.path().join("after-route"),
+        serde_json::to_vec(&changed)?,
+    )?;
+    assert!(
+        host::observe_network(&config, namespace).await.is_err(),
+        "changed default gateway rejected"
+    );
+    Ok(())
+}

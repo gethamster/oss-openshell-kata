@@ -159,6 +159,9 @@ async fn reconcile_bundle(
     );
     let launch = fetch_launch(config, client, &guest, namespace).await?;
     let mut intent = admission::derive(config, &guest, &launch)?;
+    if config.arping_path.is_some() {
+        admission::require_preboot(&guest)?;
+    }
     let network = host::network(config, &bundle.netns()?).await?;
     network.bind(&mut intent)?;
     if let Some(ip) = guest["status"]["podIP"]
@@ -196,6 +199,9 @@ async fn reconcile_bundle(
         admission::stable_broker(&launch.broker, &after_broker),
         "broker changed while resolving preboot intent"
     );
+    if config.arping_path.is_some() {
+        admission::require_preboot(&after)?;
+    }
     host::publish(&intent)?;
     Ok(true)
 }

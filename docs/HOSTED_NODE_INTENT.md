@@ -26,6 +26,7 @@ the trusted host directory rather than supplied through ConfigMap symlinks.
 | `kubeconfig_path` | Root-owned JSON kubeconfig with one context |
 | `bundle_root` | Containerd task bundle directory, mounted at the same path as the host |
 | `nsenter_path`, `ip_path` | Trusted Linux namespace and network observation executables |
+| `arping_path` | Optional trusted iputils-arping executable; enables bounded preboot gateway-neighbor initialization |
 | `broker_namespace`, `broker_namespace_uid` | `openshell-network` and its exact Namespace UID |
 | `broker_image`, `guest_image` | Qualified image references pinned by digest |
 | `additional_guest_images` | Optional additional qualified guest image digests; defaults to an empty list |
@@ -62,9 +63,15 @@ are rejected.
 The preboot guest Pod may not yet have a `status.podIP`. The observer obtains
 its IPv4 address and MAC from the pinned CNI `eth0` network namespace, then
 checks the API address if one is available. A single default route and a known
-gateway neighbor MAC must already exist. The observer does not send traffic to
-discover that neighbor. The deployed CNI must be qualified to provide these
-observations before Kata starts. Missing neighbor information prevents launch.
+gateway neighbor MAC must already exist. By default the observer sends no discovery traffic, and a missing neighbor
+prevents launch. For a CNI that leaves the gateway unresolved, the operator may
+explicitly configure `arping_path` as a protected absolute executable path. Only
+while the guest is pending and no guest process has started, the observer sends
+one bounded ARP request on the validated `eth0` to its observed default gateway.
+It uses the pinned CNI network namespace and no IP probe or guessed MAC. It then
+re-reads the interface, address, route and resolved neighbor; changed topology or
+a failed/unresolved request produces no intent. The runtime guard still verifies
+the established neighbor and installs the same packet fence before VM startup.
 
 The host must create `/run/openshell-kata/intents` as a root-owned private
 directory. Publication uses an atomic, non-overwriting `0600` file named by the
