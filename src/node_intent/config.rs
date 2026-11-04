@@ -21,6 +21,8 @@ pub(super) struct Config {
     pub bundle_root: PathBuf,
     pub nsenter_path: PathBuf,
     pub ip_path: PathBuf,
+    #[serde(default)]
+    pub arping_path: Option<PathBuf>,
     pub broker_namespace: String,
     pub broker_namespace_uid: String,
     pub broker_image: String,
@@ -56,6 +58,13 @@ impl Config {
             &config.operator_network_config_path,
         ] {
             super::host::trusted_path(path)?;
+        }
+        if let Some(path) = &config.arping_path {
+            super::host::trusted_path(path)?;
+            ensure!(
+                std::fs::metadata(path)?.is_file(),
+                "ARP executable must be a regular file"
+            );
         }
         ensure!(
             super::host::file_digest(&config.kubectl_path)? == config.kubectl_sha256,
@@ -142,6 +151,9 @@ impl Config {
                 path.is_absolute(),
                 "operator executable and state paths must be absolute"
             );
+        }
+        if let Some(path) = &self.arping_path {
+            ensure!(path.is_absolute(), "ARP executable path must be absolute");
         }
         ensure!(
             self.kubectl_sha256.len() == 64

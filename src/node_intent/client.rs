@@ -136,3 +136,30 @@ pub(super) async fn ip(namespace: &Path, config: &Config, arguments: &[&str]) ->
     command.args(arguments);
     serde_json::from_slice(&bounded(command).await?).context("invalid bounded network observation")
 }
+
+/// Resolve only the already validated link-local/default gateway before VM startup.
+pub(super) async fn resolve_gateway(
+    namespace: &Path,
+    config: &Config,
+    gateway: std::net::Ipv4Addr,
+) -> Result<()> {
+    ensure!(
+        gateway.is_private() || gateway.is_link_local(),
+        "gateway neighbor initialization requires a private or link-local gateway"
+    );
+    let executable = config
+        .arping_path
+        .as_ref()
+        .context("gateway neighbor initialization is disabled")?;
+    let mut command = Command::new(&config.nsenter_path);
+    command
+        .env_clear()
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .arg(format!("--net={}", namespace.display()))
+        .arg("--")
+        .arg(executable)
+        .args(["-I", "eth0", "-c", "1", "-w", "2"])
+        .arg(gateway.to_string());
+    bounded_for(command, Duration::from_secs(3)).await?;
+    Ok(())
+}
