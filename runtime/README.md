@@ -172,8 +172,9 @@ System environment as `BASE` and the pinned `Dockerfile.standard` image as
 `STANDARD_IMAGE`. It retains the System binaries and inherited default command,
 adds the static helper and CLI wrappers, and runs as UID/GID 1000 with home
 `/sandbox`. It neither installs a daemon nor adds Kata initialization; a base
-that already contains either is rejected. The CLI executables copied from the
-standard image are static and run on the Ubuntu/Debian environment.
+that already contains either is rejected. The workspace helper is static; the
+copied CLI executables use the distribution's musl runtime. The build checks
+that both CLI executables run on the Ubuntu/Debian environment.
 
 Build from the repository root:
 
