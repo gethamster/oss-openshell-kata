@@ -61,8 +61,9 @@ RUN set -eux; \
 COPY --from=helper /usr/local/bin/kata-workspace /usr/local/bin/kata-workspace
 COPY --from=compose /usr/libexec/docker/cli-plugins/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
 COPY runtime/guest-init.sh /usr/local/sbin/openshell-kata-init
+COPY runtime/kubernetes-init.sh /usr/local/sbin/openshell-kata-kubernetes-init
 COPY runtime/sshd_config /etc/ssh/openshell-kata.conf
-RUN chmod 755 /usr/local/sbin/openshell-kata-init /usr/local/bin/kata-workspace \
+RUN chmod 755 /usr/local/sbin/openshell-kata-init /usr/local/sbin/openshell-kata-kubernetes-init /usr/local/bin/kata-workspace \
     && ln -s /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose \
     && test -x /usr/sbin/sshd && command -v dockerd && command -v curl \
     && docker compose version && docker-compose version

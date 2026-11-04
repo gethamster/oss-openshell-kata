@@ -56,6 +56,11 @@ fn complete_v2_proof_fixture_runs_with_explicit_child_environment() {
     let b = state.broker.as_ref().expect("broker");
     let now = kube::lease::now().expect("now");
     let mut pod = broker_manifest::guest_pod(&state);
+    // The Kubernetes API omits an empty EnvVar.value on readback.
+    pod["spec"]["containers"][0]["env"][0]
+        .as_object_mut()
+        .expect("Docker TLS environment entry")
+        .remove("value");
     pod["metadata"]["labels"]["topology.kubernetes.io/region"] = json!("us-central1");
     pod["metadata"]["labels"]["topology.kubernetes.io/zone"] = json!("us-central1-a");
     let broker_path = f.root.join("pod.json");

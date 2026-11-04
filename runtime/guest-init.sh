@@ -1,5 +1,9 @@
 #!/bin/sh
 set -eu
+# Hosted guests receive projected SSH credentials and use PVC-backed Docker.
+if [ -r /run/guest-ssh/authorized_keys ] && [ -r /run/guest-ssh/host_key ]; then
+  exec /usr/local/sbin/openshell-kata-kubernetes-init
+fi
 # These mounts are inside the Kata guest. Never pass node block devices or sockets.
 if awk '$2 == "/proc/sys" {found=1} END {exit !found}' /proc/mounts; then
   mount -o remount,rw /proc/sys
