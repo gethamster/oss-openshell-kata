@@ -3027,6 +3027,7 @@ dependencies = [
  "if-addrs",
  "ipnet",
  "openshell-core",
+ "openshell-crypto",
  "openshell-supervisor-network",
  "prost",
  "prost-types",

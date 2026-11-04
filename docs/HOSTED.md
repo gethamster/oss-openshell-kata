@@ -39,6 +39,14 @@ Ephemeral storage uses Kubernetes accounting and eviction, not an instantaneous
 block quota. The local block-backed profile separately supports one vCPU and
 2 GiB memory/disk. Operator-owned templates must match the selected profile.
 
+`OPENSHELL_KATA_BILLING_CONFIG` optionally selects a private JSON file containing
+`url`, `token_file`, and `outbox_dir`. The authority file must be private and the
+outbox must be durable. For an internal HTTPS authority, set `ca_pem` to its PEM
+CA bundle; this replaces public trust roots for billing requests and never
+disables certificate verification. The standalone launcher initializes the shared
+OpenShell TLS provider before building its billing client. Leave billing
+unconfigured for self-hosted installations.
+
 ## Guarantees and limits
 
 The default `isolated` profile accepts version-1 policy with all fine-grained
