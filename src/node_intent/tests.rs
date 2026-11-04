@@ -540,6 +540,7 @@ async fn optional_arp_initialization_is_bounded_and_rereads_exact_network_identi
 root={quoted}
 case "$3" in
 */arping)
+    [ -f "$root/incomplete" ] || exit 5
     printf '%s\n' "$@" > "$root/calls"
     [ ! -f "$root/fail" ] || exit 1
     touch "$root/resolved" ;;
@@ -548,6 +549,7 @@ case "$3" in
     *'address show dev eth0') if [ -f "$root/resolved" ]; then cat "$root/after-address"; else cat "$root/address"; fi ;;
     *'route show default') if [ -f "$root/resolved" ]; then cat "$root/after-route"; else cat "$root/route"; fi ;;
     *'neigh show') if [ -f "$root/resolved" ]; then cat "$root/neighbor"; else printf '[]'; fi ;;
+    *'neigh replace 169.254.4.6 dev eth0 nud incomplete') touch "$root/incomplete" ;;
     *) exit 4 ;;
     esac ;;
 *) exit 3 ;;

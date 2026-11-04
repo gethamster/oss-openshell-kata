@@ -151,6 +151,25 @@ pub(super) async fn resolve_gateway(
         .arping_path
         .as_ref()
         .context("gateway neighbor initialization is disabled")?;
+    // A raw ARP reply does not populate an absent Linux neighbor entry.
+    // Seed only the validated gateway as unresolved; the probe supplies its MAC.
+    let mut initialize = Command::new(&config.nsenter_path);
+    initialize
+        .env_clear()
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .arg(format!("--net={}", namespace.display()))
+        .arg("--")
+        .arg(&config.ip_path)
+        .args([
+            "neigh",
+            "replace",
+            &gateway.to_string(),
+            "dev",
+            "eth0",
+            "nud",
+            "incomplete",
+        ]);
+    bounded_for(initialize, Duration::from_secs(3)).await?;
     let mut command = Command::new(&config.nsenter_path);
     command
         .env_clear()
