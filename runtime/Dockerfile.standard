@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1.7
+FROM rust:1.98.1-alpine@sha256:7cc1c22d77d9432f7fe012a70e6d3e555af54c2a6832700ed7d553f1769ae89f AS helper
+RUN apk add --no-cache build-base perl
+ARG CARGO_BUILD_JOBS=2
+WORKDIR /src
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY src ./src
+COPY proto ./proto
+COPY protocol ./protocol
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
+    cargo build --release --locked --bin kata-workspace \
+    && install -D target/release/kata-workspace /out/kata-workspace
+
+# The CLI supplies help/version output; the daemon is never installed here.
+FROM alpine:3.23@sha256:ff7f0c727dd796aa36787bfcd9a64bf35a6ce72a73451b3359fde849b6703d63
+RUN apk add --no-cache bash coreutils curl git python3 docker-cli docker-cli-compose \
+    && addgroup -g 1000 sandbox \
+    && adduser -D -h /sandbox -u 1000 -G sandbox sandbox \
+    && mkdir -p /sandbox /usr/libexec/openshell \
+    && chown 1000:1000 /sandbox \
+    && mv /usr/bin/docker /usr/libexec/openshell/docker \
+    && cp /usr/libexec/docker/cli-plugins/docker-compose /usr/libexec/openshell/docker-compose
+COPY --from=helper /out/kata-workspace /usr/local/bin/kata-workspace
+COPY runtime/docker-request /usr/local/bin/docker
+COPY runtime/docker-compose-request /usr/local/bin/docker-compose
+RUN chmod 755 /usr/local/bin/docker /usr/local/bin/docker-compose
+USER 1000:1000
+WORKDIR /sandbox
+ENTRYPOINT ["/bin/bash"]

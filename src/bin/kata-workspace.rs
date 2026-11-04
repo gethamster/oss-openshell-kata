@@ -18,6 +18,30 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Operation {
     Protocol,
+    Capability {
+        id: String,
+    },
+    Capabilities,
+    Quiesce,
+    Hold {
+        id: String,
+    },
+    Export,
+    Import,
+    Thaw,
+    CapabilityAck {
+        id: String,
+    },
+    #[command(disable_help_flag = true)]
+    Docker {
+        #[arg(num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    #[command(disable_help_flag = true)]
+    DockerCompose {
+        #[arg(num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     Run {
         id: String,
         command_json: String,
@@ -61,9 +85,59 @@ async fn execute(cli: Cli) -> Result<i32> {
         println!("openshell-kata-workspace/1");
         return Ok(0);
     }
-    let workspace = Workspace::open(cli.root)?;
+    let root = if matches!(
+        cli.command,
+        Operation::Docker { .. } | Operation::DockerCompose { .. }
+    ) {
+        std::env::var_os("OPENSHELL_WORKSPACE_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or(cli.root)
+    } else {
+        cli.root
+    };
+    let workspace = Workspace::open(root)?;
     match cli.command {
         Operation::Protocol => unreachable!("protocol was handled before opening a workspace"),
+        Operation::Capability { id } => {
+            println!(
+                "{}",
+                serde_json::to_string(&workspace::capability(&workspace, &id)?)?
+            );
+            Ok(0)
+        }
+        Operation::Export => {
+            workspace::export(&workspace, std::io::stdout().lock())?;
+            Ok(0)
+        }
+        Operation::Import => {
+            workspace::import(&workspace, std::io::stdin().lock())?;
+            Ok(0)
+        }
+        Operation::Hold { id } => {
+            workspace::hold(&workspace, &id).await?;
+            Ok(0)
+        }
+        Operation::Quiesce => {
+            workspace::quiesce(&workspace).await?;
+            Ok(0)
+        }
+        Operation::Thaw => {
+            workspace::thaw(&workspace)?;
+            Ok(0)
+        }
+        Operation::Capabilities => {
+            println!(
+                "{}",
+                serde_json::to_string(&workspace::pending(&workspace)?)?
+            );
+            Ok(0)
+        }
+        Operation::CapabilityAck { id } => {
+            workspace::acknowledge(&workspace, &id)?;
+            Ok(0)
+        }
+        Operation::Docker { args } => workspace::request_docker(&workspace, &args, false),
+        Operation::DockerCompose { args } => workspace::request_docker(&workspace, &args, true),
         Operation::Run { id, command_json } => workspace::run(&workspace, &id, &command_json).await,
         Operation::RunChild { id, command_json } => {
             workspace::run_child(&workspace, &id, &command_json).await

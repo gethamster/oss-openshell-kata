@@ -147,7 +147,7 @@ impl Workspace {
         }
     }
 
-    fn parent(&self, path: &str, create: bool) -> Result<(Dir, String)> {
+    pub(super) fn parent(&self, path: &str, create: bool) -> Result<(Dir, String)> {
         ensure!(
             path.len() <= 4096 && !path.chars().any(char::is_control),
             "invalid workspace path"

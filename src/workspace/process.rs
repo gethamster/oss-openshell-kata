@@ -31,9 +31,16 @@ pub async fn run(workspace: &Workspace, id: &str, command: &str) -> Result<i32> 
     validate_id(id)?;
     validate_command(command)?;
     ensure!(
+        !frozen(workspace)?,
+        "workspace is quiesced for a runtime move"
+    );
+    ensure!(
         cfg!(target_os = "linux"),
         "workspace process control requires Linux"
     );
+    if super::capability::read(workspace, id)?.is_some() {
+        return Ok(125);
+    }
     if cancelled(workspace, id)? {
         return Ok(137);
     }
@@ -51,7 +58,12 @@ pub async fn run(workspace: &Workspace, id: &str, command: &str) -> Result<i32> 
     let pid = child.id().context("workspace controller has no PID")?;
     let result = child.wait().await;
     cleanup_record(workspace, id, pid)?;
-    Ok(exit_code(result?))
+    let status = result?;
+    Ok(if super::capability::read(workspace, id)?.is_some() {
+        125
+    } else {
+        exit_code(status)
+    })
 }
 
 /// Run the private session controller, called only by this executable's `run` path.
@@ -76,11 +88,13 @@ pub async fn run_child(workspace: &Workspace, id: &str, command: &str) -> Result
             start: identity(pid)?.start,
         };
         publish_record(workspace, id, &record)?;
-        if cancelled(workspace, id)? {
+        if cancelled(workspace, id)? || frozen(workspace)? {
             return Ok(137);
         }
         let mut child = tokio::process::Command::new(&command[0])
             .args(&command[1..])
+            .env("OPENSHELL_WORKSPACE_COMMAND_ID", id)
+            .env("OPENSHELL_WORKSPACE_ROOT", &workspace.root)
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -174,7 +188,7 @@ pub fn kill(workspace: &Workspace, id: &str) -> Result<()> {
     }
 }
 
-fn validate_id(id: &str) -> Result<()> {
+pub(super) fn validate_id(id: &str) -> Result<()> {
     ensure!(
         Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id),
         "canonical workspace process UUID required"
@@ -200,7 +214,7 @@ fn validate_command(encoded: &str) -> Result<Vec<String>> {
     Ok(command)
 }
 
-fn process_directory(workspace: &Workspace) -> Result<Dir> {
+pub(super) fn process_directory(workspace: &Workspace) -> Result<Dir> {
     super::files::create_private_directory(&workspace.directory, RECORD_DIRECTORY)?;
     let directory = workspace.directory.open_dir_nofollow(RECORD_DIRECTORY)?;
     #[cfg(unix)]
@@ -296,6 +310,9 @@ fn read_record(workspace: &Workspace, id: &str) -> Result<Option<Record>> {
 }
 
 fn cleanup_record(workspace: &Workspace, id: &str, pid: u32) -> Result<()> {
+    if super::capability::read(workspace, id)?.is_some() {
+        return Ok(());
+    }
     if let Some(record) = read_record(workspace, id)? {
         ensure!(record.pid == pid, "workspace process record was replaced");
         let directory = process_directory(workspace)?;
@@ -310,6 +327,8 @@ struct Identity {
     start: u64,
     group: u32,
     session: u32,
+    parent: u32,
+    state: String,
 }
 
 #[cfg(target_os = "linux")]
@@ -324,6 +343,8 @@ fn identity(pid: rustix::process::Pid) -> Result<Identity> {
         group: parts[2].parse()?,
         session: parts[3].parse()?,
         start: parts[19].parse()?,
+        parent: parts[1].parse()?,
+        state: parts[0].into(),
     })
 }
 
@@ -339,6 +360,247 @@ fn exit_code(status: ExitStatus) -> i32 {
     status
         .code()
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(1))
+}
+
+const FREEZE_MARKER: &str = ".system-quiesced";
+
+fn frozen(workspace: &Workspace) -> Result<bool> {
+    match workspace.directory.symlink_metadata(FREEZE_MARKER) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() == 0,
+                "invalid workspace quiescence marker"
+            );
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Stop helper-managed process groups and prevent subsequent helper launches.
+pub async fn quiesce(workspace: &Workspace) -> Result<()> {
+    let mut options = super::files::private_file_options();
+    options.write(true).create_new(true);
+    match workspace.directory.open_with(FREEZE_MARKER, &options) {
+        Ok(file) => file.sync_all()?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            frozen(workspace)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    super::files::sync_directory(&workspace.directory)?;
+    let directory = process_directory(workspace)?;
+    let mut ids = Vec::new();
+    for entry in directory.entries()? {
+        let name = entry?.file_name();
+        if let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".json"))
+            && Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id)
+        {
+            ids.push(id.to_owned());
+        }
+    }
+    for id in &ids {
+        #[cfg(target_os = "linux")]
+        if let Some(record) = read_record(workspace, id)? {
+            let live = i32::try_from(record.pid)
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+                .and_then(|pid| identity(pid).ok())
+                .is_some_and(|current| current.start == record.start && current.state != "Z");
+            if !live {
+                continue;
+            }
+        }
+        kill(workspace, id)?;
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let active = ids.iter().try_fold(false, |active, id| -> Result<bool> {
+            let record = read_record(workspace, id)?;
+            #[cfg(target_os = "linux")]
+            if let Some(record) = record
+                && let Some(pid) = i32::try_from(record.pid)
+                    .ok()
+                    .and_then(rustix::process::Pid::from_raw)
+            {
+                return Ok(active
+                    || identity(pid).is_ok_and(|current| {
+                        current.start == record.start && current.state != "Z"
+                    }));
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = record;
+            Ok(active)
+        })?;
+        if !active {
+            verify_quiescent(workspace)?;
+            return Ok(());
+        }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "workspace processes did not stop"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Resume new helper launches after an unsuccessful runtime move.
+pub fn thaw(workspace: &Workspace) -> Result<()> {
+    match workspace.directory.remove_file(FREEZE_MARKER) {
+        Ok(()) => super::files::sync_directory(&workspace.directory),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Deserialize, Serialize)]
+struct Ancestor {
+    pid: u32,
+    start: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn ancestors(mut pid: rustix::process::Pid) -> Result<Vec<Ancestor>> {
+    let mut result = Vec::new();
+    loop {
+        let process = identity(pid)?;
+        let Some(parent) = i32::try_from(process.parent)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+        else {
+            break;
+        };
+        pid = parent;
+        let process = identity(pid)?;
+        result.push(Ancestor {
+            pid: pid.as_raw_nonzero().get() as u32,
+            start: process.start,
+        });
+        ensure!(
+            result.len() <= 128,
+            "workspace process ancestry limit exceeded"
+        );
+    }
+    Ok(result)
+}
+
+#[cfg(target_os = "linux")]
+fn holding(record: &Record, id: &str) -> Result<bool> {
+    let Some(pid) = i32::try_from(record.pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return Ok(false);
+    };
+    let Ok(current) = identity(pid) else {
+        return Ok(false);
+    };
+    if current.start != record.start || current.state == "Z" {
+        return Ok(false);
+    }
+    if std::fs::read_link(format!("/proc/{}/exe", record.pid))? != std::env::current_exe()? {
+        return Ok(false);
+    }
+    let argv = std::fs::read(format!("/proc/{}/cmdline", record.pid))?;
+    Ok(argv
+        .split(|byte| *byte == 0)
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|pair| pair[0] == b"hold" && pair[1] == id.as_bytes()))
+}
+
+/// Recheck the frozen source immediately before reading an export.
+pub(super) fn verify_quiescent(_workspace: &Workspace) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let workspace = _workspace;
+        let mut allowed = ancestors(rustix::process::getpid())?;
+        for entry in process_directory(workspace)?.entries()? {
+            let name = entry?.file_name();
+            if let Some(id) = name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".hold.json"))
+            {
+                validate_id(id)?;
+                if let Some(record) = read_record(workspace, &format!("{id}.hold"))?
+                    && holding(&record, id)?
+                {
+                    allowed.push(Ancestor {
+                        pid: record.pid,
+                        start: record.start,
+                    });
+                }
+            }
+        }
+        require_quiescent(&allowed)?;
+    }
+    Ok(())
+}
+
+pub(super) fn verify_frozen_export(workspace: &Workspace) -> Result<()> {
+    if frozen(workspace)? {
+        verify_quiescent(workspace)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn require_quiescent(allowed: &[Ancestor]) -> Result<()> {
+    let own = rustix::process::getpid().as_raw_nonzero().get() as u32;
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+            .and_then(rustix::process::Pid::from_raw)
+        else {
+            continue;
+        };
+        let raw = pid.as_raw_nonzero().get() as u32;
+        if raw == own {
+            continue;
+        }
+        let current = match identity(pid) {
+            Ok(current) => current,
+            Err(error) if is_missing(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        if current.state == "Z"
+            || allowed
+                .iter()
+                .any(|allowed| allowed.pid == raw && allowed.start == current.start)
+        {
+            continue;
+        }
+        anyhow::bail!(
+            "workspace still has an untracked live process ({raw}); refusing a non-quiescent export"
+        );
+    }
+    Ok(())
+}
+
+/// Keep a completed owner workload alive without running more guest commands.
+pub async fn hold(_workspace: &Workspace, id: &str) -> Result<()> {
+    validate_id(id)?;
+    #[cfg(target_os = "linux")]
+    {
+        let workspace = _workspace;
+        let pid = rustix::process::getpid();
+        publish_record(
+            workspace,
+            &format!("{id}.hold"),
+            &Record {
+                version: 1,
+                pid: pid.as_raw_nonzero().get() as u32,
+                start: identity(pid)?.start,
+            },
+        )?;
+        std::future::pending::<()>().await;
+    }
+    anyhow::bail!("workspace holding requires Linux")
 }
 
 #[cfg(test)]

@@ -61,6 +61,30 @@ trusted startup preparation and socket readiness without Python. Both guest
 recipes include `kata-workspace` for System command/file operations and protocol
 compatibility checks.
 
+Normal OpenShell workloads can use [the standard image](runtime/Dockerfile.standard),
+which runs as UID/GID 1000 and includes the same workspace helper without a Docker
+daemon. Its Docker CLI wrappers execute help/version requests locally. A command
+that needs a daemon records a `docker` capability request and returns status 125;
+the application owner decides whether to move the authorized session to Kata.
+This image does not change the adapter's Kata-only compute contract.
+
+`kata-workspace capability <command-uuid>` returns that command's request or
+`null`; `capabilities` lists pending requests and `capability-ack <uuid>` removes
+one. A helper-managed command is interrupted as a group before status 125 is
+returned. `hold <uuid>` keeps an interrupted owner workload available for file
+transfer. `quiesce` blocks new helper commands, stops managed groups, and refuses
+transfer preparation while an untracked live process remains; `thaw` permits
+commands after a failed move.
+
+`export` and `import` stream deterministic USTAR workspace archives for runtime
+moves. They retain hidden files and executable permissions, allow only relative
+symlinks contained by `/sandbox`, and reject hard links, special files, extensions,
+duplicate paths, and escapes. Each archive is bounded to 1 GiB of content and
+100,000 entries. Import validates in a private staging directory before replacing
+the candidate's user files; retries replace the same data. Helper process records
+and freeze markers never transfer. This guest convenience protocol is separate
+from the host-enforced upload/download interface and its stricter archive limits.
+
 ## Local development
 
 The current local setup targets an Apple Silicon Mac with nested virtualization,

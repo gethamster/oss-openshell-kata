@@ -28,6 +28,43 @@ fn protocol_is_available_without_opening_the_default_workspace() {
 }
 
 #[test]
+fn unmanaged_docker_request_is_structured_and_acknowledgeable() {
+    let root = tempfile::tempdir().expect("workspace");
+    let output = helper(root.path())
+        .args(["docker", "info"])
+        .env_remove("OPENSHELL_WORKSPACE_COMMAND_ID")
+        .env_remove("OPENSHELL_WORKSPACE_ROOT")
+        .output()
+        .expect("request Docker");
+    assert_eq!(output.status.code(), Some(125));
+    let pending = helper(root.path())
+        .arg("capabilities")
+        .output()
+        .expect("pending requests");
+    let requests: Vec<serde_json::Value> =
+        serde_json::from_slice(&pending.stdout).expect("requests");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["capability"], "docker");
+    let id = requests[0]["command_id"].as_str().expect("command UUID");
+    assert!(uuid::Uuid::parse_str(id).is_ok());
+    assert!(
+        helper(root.path())
+            .args(["capability-ack", id])
+            .status()
+            .expect("acknowledge")
+            .success()
+    );
+    assert_eq!(
+        helper(root.path())
+            .arg("capabilities")
+            .output()
+            .expect("cleared")
+            .stdout,
+        b"[]\n"
+    );
+}
+
+#[test]
 fn cli_files_preserve_binary_bytes_missing_status_and_removal_flags() {
     let root = tempfile::tempdir().expect("workspace");
     let bytes = b"binary\0file\xff";
@@ -245,5 +282,69 @@ mod linux {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(output.stdout.is_empty(), "command ran after cancellation");
+    }
+
+    #[test]
+    fn nested_docker_request_interrupts_without_replaying_or_running_later_commands() {
+        let root = tempfile::tempdir().expect("workspace");
+        let id = Uuid::new_v4().to_string();
+        let child = spawn(
+            root.path(),
+            &id,
+            &[
+                "sh",
+                "-c",
+                "printf before; \"$1\" docker info; printf after",
+                "sh",
+                env!("CARGO_BIN_EXE_kata-workspace"),
+            ],
+        );
+        let output = child.wait_with_output().expect("Docker request");
+        assert_eq!(
+            output.status.code(),
+            Some(125),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"before");
+        let request = helper(root.path())
+            .args(["capability", &id])
+            .output()
+            .expect("capability query");
+        assert!(request.status.success());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&request.stdout).expect("request JSON"),
+            serde_json::json!({"version":1,"capability":"docker","command_id":id})
+        );
+        let pending = helper(root.path())
+            .arg("capabilities")
+            .output()
+            .expect("pending requests");
+        assert_eq!(
+            serde_json::from_slice::<Vec<serde_json::Value>>(&pending.stdout)
+                .expect("requests")
+                .len(),
+            1
+        );
+        let replay = spawn(root.path(), &id, &["sh", "-c", "printf replayed"])
+            .wait_with_output()
+            .expect("same operation");
+        assert_eq!(replay.status.code(), Some(125));
+        assert!(replay.stdout.is_empty(), "interrupted command was replayed");
+        assert!(
+            helper(root.path())
+                .args(["capability-ack", &id])
+                .status()
+                .expect("acknowledge")
+                .success()
+        );
+        assert_eq!(
+            helper(root.path())
+                .args(["capability", &id])
+                .output()
+                .expect("query acknowledged")
+                .stdout,
+            b"null\n"
+        );
     }
 }
