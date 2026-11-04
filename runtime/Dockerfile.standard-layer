@@ -18,7 +18,7 @@ RUN set -eux; \
     test -x /usr/local/bin/system-minion-entry; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      bash ca-certificates coreutils curl passwd musl python3; \
+      bash ca-certificates coreutils curl git passwd musl python3; \
     rm -rf /var/lib/apt/lists/*; \
     group=$(getent group 1000 | cut -d: -f1 || true); \
     if [ -z "$group" ]; then groupadd -g 1000 sandbox; \
@@ -48,3 +48,13 @@ RUN test -x /usr/local/bin/system-agent \
 ENV HOME=/sandbox
 USER 1000:1000
 WORKDIR /sandbox
+RUN set -eux; \
+    test "$(id -u)" = 1000; \
+    directory=$(mktemp -d /sandbox/.git-image-smoke.XXXXXX); \
+    trap 'rm -rf "$directory"' EXIT; \
+    git -C "$directory" init --quiet; \
+    printf 'workspace image smoke\n' > "$directory/check.txt"; \
+    git -C "$directory" add check.txt; \
+    git -C "$directory" -c user.name=ImageSmoke -c user.email=image-smoke@example.invalid \
+      commit --quiet -m 'Verify workspace Git'; \
+    test -z "$(git -C "$directory" status --porcelain)"
