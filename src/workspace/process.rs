@@ -1,5 +1,5 @@
 use super::Workspace;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::Dir;
 use serde::{Deserialize, Serialize};
@@ -11,11 +11,15 @@ use std::{
 };
 use uuid::Uuid;
 
+#[cfg(target_os = "linux")]
+#[path = "process_cancellation.rs"]
+mod cancellation;
+
 const RECORD_DIRECTORY: &str = ".system-processes";
 const MAX_COMMAND_BYTES: usize = 128 * 1024;
 const MAX_RECORD_BYTES: u64 = 4096;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Record {
     version: u32,
@@ -75,12 +79,11 @@ pub async fn run_child(workspace: &Workspace, id: &str, command: &str) -> Result
     let command = validate_command(command)?;
     #[cfg(target_os = "linux")]
     {
-        use rustix::process::{Signal, getpid, kill_process_group, setsid};
-        use tokio::signal::unix::{SignalKind, signal};
+        use rustix::process::{getpid, set_child_subreaper, setsid};
         setsid().context("create workspace process session")?;
-        // Register before publishing identity: a cancellation can never arrive
-        // between a visible record and installation of its handler.
-        let mut cancel = signal(SignalKind::user_defined1())?;
+        // Orphaned descendants, including detached sessions, return to this
+        // controller so cancellation can retain kernel child ownership.
+        set_child_subreaper(Some(getpid())).context("retain workspace descendants")?;
         let pid = getpid();
         let record = Record {
             version: 1,
@@ -91,37 +94,19 @@ pub async fn run_child(workspace: &Workspace, id: &str, command: &str) -> Result
         if cancelled(workspace, id)? || frozen(workspace)? {
             return Ok(137);
         }
-        let mut child = tokio::process::Command::new(&command[0])
-            .args(&command[1..])
-            .env("OPENSHELL_WORKSPACE_COMMAND_ID", id)
-            .env("OPENSHELL_WORKSPACE_ROOT", &workspace.root)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .context("spawn workspace command")?;
-        tokio::select! {
-            biased;
-            _ = cancel.recv() => {
-                // The pinned controller signals its own extant process group.
-                // A separate caller never signals a numeric PGID after a PID race.
-                kill_process_group(pid, Signal::KILL)?;
-                bail!("workspace process group survived cancellation");
-            }
-            result = child.wait() => Ok(exit_code(result?)),
-        }
+        cancellation::run(workspace, id, &command, &record).await
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (workspace, command);
-        bail!("workspace process control requires Linux")
+        anyhow::bail!("workspace process control requires Linux")
     }
 }
 
-/// Cancel the exact retained controller through a verified Linux pidfd.
+/// Publish cancellation for the exact retained controller.
 ///
 /// # Errors
-/// Rejects forged/stale process identities, unsupported hosts and signal failures.
+/// Rejects forged/stale process identities, unsupported hosts and cancellation-record failures.
 pub fn kill(workspace: &Workspace, id: &str) -> Result<()> {
     validate_id(id)?;
     let record = match read_record(workspace, id)? {
@@ -139,18 +124,10 @@ pub fn kill(workspace: &Workspace, id: &str) -> Result<()> {
     };
     #[cfg(target_os = "linux")]
     {
-        use rustix::{
-            io::Errno,
-            process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal},
-        };
+        use rustix::process::Pid;
         let pid = Pid::from_raw(i32::try_from(record.pid)?)
             .context("invalid workspace controller PID")?;
-        let descriptor = match pidfd_open(pid, PidfdFlags::empty()) {
-            Ok(value) => value,
-            Err(Errno::SRCH) => return Ok(()),
-            Err(error) => return Err(error.into()),
-        };
-        let observed = match identity(pid) {
+        let observed = match identity(pid).context("read workspace controller identity") {
             Ok(value) => value,
             Err(error) if is_missing(&error) => return Ok(()),
             Err(error) => return Err(error),
@@ -163,28 +140,34 @@ pub fn kill(workspace: &Workspace, id: &str) -> Result<()> {
             observed.group == record.pid && observed.session == record.pid,
             "workspace process session changed"
         );
-        let executable = std::fs::read_link(format!("/proc/{}/exe", record.pid))?;
-        ensure!(
-            executable == std::env::current_exe()?,
-            "workspace controller executable changed"
-        );
-        let argv = std::fs::read(format!("/proc/{}/cmdline", record.pid))?;
-        let tokens = argv.split(|byte| *byte == 0).collect::<Vec<_>>();
-        ensure!(
-            tokens
-                .windows(2)
-                .any(|pair| pair[0] == b"__run-child" && pair[1] == id.as_bytes()),
-            "workspace controller operation changed"
-        );
-        match pidfd_send_signal(&descriptor, Signal::USR1) {
-            Ok(()) | Err(Errno::SRCH) => Ok(()),
-            Err(error) => Err(error.into()),
+        // Cross-process exe/cmdline access is deliberately restricted by the
+        // normal runtime. No PID is signalled here: the UUID-bound controller
+        // validates this exact record against its own retained identity.
+        replace_record(workspace, &format!("{id}.cancel"), &record)?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        loop {
+            if let Some(acknowledged) = read_record(workspace, &format!("{id}.cancel-ack"))? {
+                ensure!(
+                    acknowledged == record,
+                    "workspace cancellation acknowledgement changed"
+                );
+                return Ok(());
+            }
+            ensure!(
+                !drain_failed(workspace, id)?,
+                "workspace cancellation drain failed"
+            );
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "workspace cancellation was not acknowledged"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = record;
-        bail!("workspace process control requires Linux")
+        anyhow::bail!("workspace process control requires Linux")
     }
 }
 
@@ -251,6 +234,25 @@ fn publish_record(workspace: &Workspace, id: &str, record: &Record) -> Result<()
     super::files::sync_directory(&directory)
 }
 
+#[cfg(target_os = "linux")]
+fn replace_record(workspace: &Workspace, id: &str, record: &Record) -> Result<()> {
+    let directory = process_directory(workspace)?;
+    let staged = format!(".identity-{}", Uuid::new_v4());
+    let mut options = super::files::private_file_options();
+    options.write(true).create_new(true);
+    let result: Result<()> = (|| {
+        let mut file = directory.open_with(&staged, &options)?;
+        file.write_all(&serde_json::to_vec(record)?)?;
+        file.sync_all()?;
+        directory.rename(&staged, &directory, format!("{id}.json"))?;
+        super::files::sync_directory(&directory)
+    })();
+    if result.is_err() {
+        let _ = directory.remove_file(staged);
+    }
+    result
+}
+
 fn cancelled(workspace: &Workspace, id: &str) -> Result<bool> {
     let directory = process_directory(workspace)?;
     match directory.symlink_metadata(format!("{id}.cancelled")) {
@@ -286,6 +288,29 @@ fn mark_cancelled(workspace: &Workspace, id: &str) -> Result<()> {
     }
 }
 
+// Retain explicit failure evidence: an uncertain drain must never look like
+// an idle source after the controller exits or the transport reconnects.
+#[cfg(target_os = "linux")]
+fn mark_drain_failed(workspace: &Workspace, id: &str) -> Result<()> {
+    let directory = process_directory(workspace)?;
+    let mut options = super::files::private_file_options();
+    options.write(true).create_new(true);
+    match directory.open_with(format!("{id}.drain-failed"), &options) {
+        Ok(file) => file.sync_all()?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    super::files::sync_directory(&directory)
+}
+
+fn drain_failed(workspace: &Workspace, id: &str) -> Result<bool> {
+    match process_directory(workspace)?.symlink_metadata(format!("{id}.drain-failed")) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn read_record(workspace: &Workspace, id: &str) -> Result<Option<Record>> {
     let directory = process_directory(workspace)?;
     let mut options = super::files::private_file_options();
@@ -310,7 +335,7 @@ fn read_record(workspace: &Workspace, id: &str) -> Result<Option<Record>> {
 }
 
 fn cleanup_record(workspace: &Workspace, id: &str, pid: u32) -> Result<()> {
-    if super::capability::read(workspace, id)?.is_some() {
+    if super::capability::read(workspace, id)?.is_some() || drain_failed(workspace, id)? {
         return Ok(());
     }
     if let Some(record) = read_record(workspace, id)? {
@@ -378,7 +403,7 @@ fn frozen(workspace: &Workspace) -> Result<bool> {
     }
 }
 
-/// Stop helper-managed process groups and prevent subsequent helper launches.
+/// Stop helper-managed descendants and prevent subsequent helper launches.
 pub async fn quiesce(workspace: &Workspace) -> Result<()> {
     let mut options = super::files::private_file_options();
     options.write(true).create_new(true);
@@ -434,8 +459,14 @@ pub async fn quiesce(workspace: &Workspace) -> Result<()> {
             Ok(active)
         })?;
         if !active {
-            verify_quiescent(workspace)?;
-            return Ok(());
+            stop_holders(workspace).await?;
+            match verify_quiescent(workspace) {
+                Ok(()) => return Ok(()),
+                // An owner shell can enter hold just after its command drains.
+                // Reconcile that late holder; never exempt an unknown process.
+                Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
+                Err(_) => {}
+            }
         }
         ensure!(
             tokio::time::Instant::now() < deadline,
@@ -486,29 +517,59 @@ fn ancestors(mut pid: rustix::process::Pid) -> Result<Vec<Ancestor>> {
     Ok(result)
 }
 
-#[cfg(target_os = "linux")]
-fn holding(record: &Record, id: &str) -> Result<bool> {
-    let Some(pid) = i32::try_from(record.pid)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw)
-    else {
-        return Ok(false);
-    };
-    let Ok(current) = identity(pid) else {
-        return Ok(false);
-    };
-    if current.start != record.start || current.state == "Z" {
-        return Ok(false);
+/// Holders are stopped through their own identity-bound requests. No live
+/// process is exempted based on a writable workspace record.
+async fn stop_holders(workspace: &Workspace) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let directory = process_directory(workspace)?;
+        let mut holders = Vec::new();
+        for entry in directory.entries()? {
+            let name = entry?.file_name();
+            let Some(id) = name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".hold.json"))
+            else {
+                continue;
+            };
+            validate_id(id)?;
+            let Some(record) = read_record(workspace, &format!("{id}.hold"))? else {
+                continue;
+            };
+            ensure!(record.version == 1, "unsupported holder identity");
+            replace_record(workspace, &format!("{id}.hold-exit"), &record)?;
+            holders.push(record);
+            ensure!(holders.len() <= 4096, "workspace holder limit exceeded");
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let mut live = false;
+            for record in &holders {
+                let pid = i32::try_from(record.pid)
+                    .ok()
+                    .and_then(rustix::process::Pid::from_raw)
+                    .context("invalid holder PID")?;
+                match identity(pid) {
+                    Ok(current) => live |= current.start == record.start && current.state != "Z",
+                    Err(error) if is_missing(&error) => {}
+                    Err(error) => return Err(error.context("verify holder exit")),
+                }
+            }
+            if !live {
+                return Ok(());
+            }
+            ensure!(
+                tokio::time::Instant::now() < deadline,
+                "workspace holders did not exit"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
-    if std::fs::read_link(format!("/proc/{}/exe", record.pid))? != std::env::current_exe()? {
-        return Ok(false);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = workspace;
+        anyhow::bail!("workspace quiescence requires Linux")
     }
-    let argv = std::fs::read(format!("/proc/{}/cmdline", record.pid))?;
-    Ok(argv
-        .split(|byte| *byte == 0)
-        .collect::<Vec<_>>()
-        .windows(2)
-        .any(|pair| pair[0] == b"hold" && pair[1] == id.as_bytes()))
 }
 
 /// Recheck the frozen source immediately before reading an export.
@@ -516,23 +577,15 @@ pub(super) fn verify_quiescent(_workspace: &Workspace) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         let workspace = _workspace;
-        let mut allowed = ancestors(rustix::process::getpid())?;
+        let allowed = ancestors(rustix::process::getpid())?;
         for entry in process_directory(workspace)?.entries()? {
             let name = entry?.file_name();
-            if let Some(id) = name
-                .to_str()
-                .and_then(|name| name.strip_suffix(".hold.json"))
-            {
-                validate_id(id)?;
-                if let Some(record) = read_record(workspace, &format!("{id}.hold"))?
-                    && holding(&record, id)?
-                {
-                    allowed.push(Ancestor {
-                        pid: record.pid,
-                        start: record.start,
-                    });
-                }
-            }
+            ensure!(
+                !name
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(".drain-failed")),
+                "workspace descendant drain remains unverified"
+            );
         }
         require_quiescent(&allowed)?;
     }
@@ -589,23 +642,58 @@ pub async fn hold(_workspace: &Workspace, id: &str) -> Result<()> {
     {
         let workspace = _workspace;
         let pid = rustix::process::getpid();
-        publish_record(
-            workspace,
-            &format!("{id}.hold"),
-            &Record {
-                version: 1,
-                pid: pid.as_raw_nonzero().get() as u32,
-                start: identity(pid)?.start,
-            },
-        )?;
-        std::future::pending::<()>().await;
+        let record = Record {
+            version: 1,
+            pid: pid.as_raw_nonzero().get() as u32,
+            start: identity(pid)?.start,
+        };
+        publish_record(workspace, &format!("{id}.hold"), &record)?;
+        loop {
+            if let Some(request) = read_record(workspace, &format!("{id}.hold-exit"))? {
+                ensure!(request == record, "workspace holder stop identity changed");
+                ensure!(
+                    read_record(workspace, &format!("{id}.hold"))? == Some(record),
+                    "workspace holder identity was replaced"
+                );
+                let directory = process_directory(workspace)?;
+                // Remove the consumed request before freeing the identity so
+                // a verified source restart can reuse its canonical holder ID.
+                directory.remove_file(format!("{id}.hold-exit.json"))?;
+                directory.remove_file(format!("{id}.hold.json"))?;
+                super::files::sync_directory(&directory)?;
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
+    #[cfg(not(target_os = "linux"))]
     anyhow::bail!("workspace holding requires Linux")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_drain_retains_record_and_blocks_export_after_thaw() {
+        let directory = tempfile::tempdir().expect("workspace");
+        let workspace = Workspace::open(directory.path()).expect("open workspace");
+        let id = Uuid::new_v4().to_string();
+        let pid = rustix::process::getpid();
+        let record = Record {
+            version: 1,
+            pid: pid.as_raw_nonzero().get() as u32,
+            start: identity(pid).expect("current process").start,
+        };
+        publish_record(&workspace, &id, &record).expect("publish identity");
+        mark_drain_failed(&workspace, &id).expect("persist failed drain");
+        cleanup_record(&workspace, &id, record.pid).expect("retain failed record");
+        assert!(read_record(&workspace, &id).expect("read record").is_some());
+        thaw(&workspace).expect("thaw does not erase failed drain");
+        let error = verify_quiescent(&workspace).expect_err("failed drain is not quiescent");
+        assert!(error.to_string().contains("drain remains unverified"));
+    }
 
     #[test]
     fn process_argument_validation_rejects_ambiguous_identity_and_commands() {

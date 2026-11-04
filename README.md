@@ -70,11 +70,26 @@ This image does not change the adapter's Kata-only compute contract.
 
 `kata-workspace capability <command-uuid>` returns that command's request or
 `null`; `capabilities` lists pending requests and `capability-ack <uuid>` removes
-one. A helper-managed command is interrupted as a group before status 125 is
-returned. `hold <uuid>` keeps an interrupted owner workload available for file
-transfer. `quiesce` blocks new helper commands, stops managed groups, and refuses
-transfer preparation while an untracked live process remains; `thaw` permits
-commands after a failed move.
+one. A helper-managed command and its descendants are interrupted before status
+125 is returned. Cancellation publishes a durable request to the command's
+controller, including its retained PID and start identity. The controller verifies
+that identity against its own launch record and acknowledges only after draining
+its descendants. This does not require cross-process executable inspection.
+The controller retains orphaned descendants as a Linux subreaper,
+signals only its own unreaped children, and waits for all of them to exit. It
+requires neither pidfds nor process-group signals, which normal OpenShell
+workloads prohibit. A failed drain retains evidence and prevents a successful
+quiescence check.
+
+`hold <uuid>` keeps an interrupted owner workload available for file transfer.
+`quiesce` blocks new helper commands, stops managed descendants and holders,
+and refuses transfer preparation while any untracked live process remains.
+A writable holder record never exempts a live process from this check.
+`quiesce-export` performs quiescence and streams the archive within one already
+admitted command; use it when holder exit completes the sandbox's main process
+and prevents admitting another command. The source files remain intact on
+failure. Recovery must restore an authorized running transport before using
+`thaw`; do not recreate or discard the authoritative source to conceal failure.
 
 `export` and `import` stream deterministic USTAR workspace archives for runtime
 moves. They retain hidden files and executable permissions, allow only relative

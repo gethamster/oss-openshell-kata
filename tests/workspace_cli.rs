@@ -261,6 +261,167 @@ mod linux {
     }
 
     #[test]
+    fn cancellation_drains_detached_double_fork_descendants() {
+        let root = tempfile::tempdir().expect("workspace");
+        let marker = root.path().join("detached-pid");
+        let id = Uuid::new_v4().to_string();
+        let child = spawn(
+            root.path(),
+            &id,
+            &[
+                "sh",
+                "-c",
+                r#"setsid sh -c 'sleep 60 & echo $! > "$1"' sh "$1"; sleep 60"#,
+                "sh",
+                marker.to_str().expect("path"),
+            ],
+        );
+        wait_for(&marker);
+        let descendant = fs::read_to_string(&marker).expect("detached PID");
+        let output = helper(root.path())
+            .args(["kill", &id])
+            .output()
+            .expect("cancel");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = child.wait_with_output().expect("drained controller");
+        assert_eq!(
+            output.status.code(),
+            Some(137),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !std::path::Path::new(&format!("/proc/{}", descendant.trim())).exists(),
+            "detached descendant must be reaped before cancellation succeeds"
+        );
+    }
+
+    #[test]
+    fn forged_cancel_request_never_acknowledges_or_becomes_quiescent() {
+        let root = tempfile::tempdir().expect("workspace");
+        let marker = root.path().join("ready");
+        let id = Uuid::new_v4().to_string();
+        let child = spawn(
+            root.path(),
+            &id,
+            &[
+                "sh",
+                "-c",
+                "touch \"$1\"; sleep 0.3",
+                "sh",
+                marker.to_str().expect("path"),
+            ],
+        );
+        wait_for(&marker);
+        let directory = root.path().join(".system-processes");
+        let mut record: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.join(format!("{id}.json"))).expect("record"),
+        )
+        .expect("record JSON");
+        record["start"] = (record["start"].as_u64().expect("start") + 1).into();
+        fs::write(
+            directory.join(format!("{id}.cancel.json")),
+            serde_json::to_vec(&record).expect("request"),
+        )
+        .expect("forged request");
+        let output = child
+            .wait_with_output()
+            .expect("controller rejected request");
+        assert!(!output.status.success());
+        assert!(!directory.join(format!("{id}.cancel-ack.json")).exists());
+        assert!(directory.join(format!("{id}.drain-failed")).exists());
+        assert!(
+            !helper(root.path())
+                .arg("quiesce")
+                .output()
+                .expect("quiescence check")
+                .status
+                .success()
+        );
+    }
+
+    #[test]
+    fn holder_exits_only_for_its_retained_identity() {
+        for forged in [false, true] {
+            let root = tempfile::tempdir().expect("workspace");
+            let id = Uuid::new_v4().to_string();
+            let child = helper(root.path())
+                .args(["hold", &id])
+                .spawn()
+                .expect("holder");
+            let directory = root.path().join(".system-processes");
+            let path = directory.join(format!("{id}.hold.json"));
+            wait_for(&path);
+            let mut record: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).expect("holder identity")).expect("JSON");
+            if forged {
+                record["start"] = (record["start"].as_u64().expect("start") + 1).into();
+            }
+            fs::write(
+                directory.join(format!("{id}.hold-exit.json")),
+                serde_json::to_vec(&record).expect("request"),
+            )
+            .expect("stop request");
+            let output = child.wait_with_output().expect("stopped holder");
+            assert_eq!(output.status.success(), !forged);
+            if !forged {
+                assert!(!directory.join(format!("{id}.hold.json")).exists());
+                assert!(!directory.join(format!("{id}.hold-exit.json")).exists());
+            }
+        }
+    }
+
+    #[test]
+    fn a_forged_holder_record_cannot_exempt_a_live_writer_from_export() {
+        let root = tempfile::tempdir().expect("workspace");
+        let directory = root.path().join(".system-processes");
+        fs::create_dir(&directory).expect("control directory");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("private control directory");
+        let mut writer = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("unmanaged process");
+        let stat =
+            fs::read_to_string(format!("/proc/{}/stat", writer.id())).expect("kernel identity");
+        let start = stat
+            .rsplit_once(')')
+            .expect("stat")
+            .1
+            .split_whitespace()
+            .nth(19)
+            .expect("start")
+            .parse::<u64>()
+            .expect("numeric start");
+        let id = Uuid::new_v4().to_string();
+        fs::write(
+            directory.join(format!("{id}.hold.json")),
+            serde_json::to_vec(&serde_json::json!({"version":1,"pid":writer.id(),"start":start}))
+                .expect("record"),
+        )
+        .expect("forged holder record");
+        let output = helper(root.path())
+            .arg("quiesce-export")
+            .output()
+            .expect("export attempt");
+        let still_live = writer.try_wait().expect("process status").is_none();
+        writer.kill().expect("clean up owned process");
+        writer.wait().expect("reap owned process");
+        assert!(
+            still_live,
+            "helper must never signal a record-selected unrelated process"
+        );
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty(), "no archive before quiescence");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("holders did not exit"));
+    }
+
+    #[test]
     fn cancellation_before_record_publication_prevents_later_execution() {
         let root = tempfile::tempdir().expect("workspace");
         let id = Uuid::new_v4().to_string();
