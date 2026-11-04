@@ -238,6 +238,7 @@ pub(super) fn validate(
             &observed.policies,
             &observed.pod["metadata"]["labels"],
             binding,
+            control_namespace,
         )?;
     } else {
         ensure!(

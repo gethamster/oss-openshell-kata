@@ -65,19 +65,45 @@ fn broker_is_trusted_tokenless_and_generation_bound() {
 fn brokered_guest_has_only_combined_exact_broker_principal() {
     let config = config();
     let binding = binding();
-    let p = broker_manifest::guest_policy(&binding.sandbox_name, "sandbox-tenant", &binding);
+    let p = broker_manifest::guest_policy(
+        &binding.sandbox_name,
+        "sandbox-tenant",
+        &binding,
+        super::policy::DEFAULT_CONTROL_NAMESPACE,
+    );
     let labels = broker_manifest::guest_labels(&binding.sandbox_name, &binding);
-    broker_policy::validate_guest(std::slice::from_ref(&p), &labels, &binding)
-        .expect("exact fence");
+    broker_policy::validate_guest(
+        std::slice::from_ref(&p),
+        &labels,
+        &binding,
+        super::policy::DEFAULT_CONTROL_NAMESPACE,
+    )
+    .expect("exact fence");
     let mut broaden = p.clone();
     broaden["spec"]["egress"][0]["to"][0]
         .as_object_mut()
         .expect("peer")
         .remove("podSelector");
-    assert!(broker_policy::validate_guest(&[p.clone(), broaden], &labels, &binding).is_err());
+    assert!(
+        broker_policy::validate_guest(
+            &[p.clone(), broaden],
+            &labels,
+            &binding,
+            super::policy::DEFAULT_CONTROL_NAMESPACE
+        )
+        .is_err()
+    );
     let mut broaden = p.clone();
     broaden["spec"]["egress"][0]["ports"][0]["endPort"] = json!(65535);
-    assert!(broker_policy::validate_guest(&[p, broaden], &labels, &binding).is_err());
+    assert!(
+        broker_policy::validate_guest(
+            &[p, broaden],
+            &labels,
+            &binding,
+            super::policy::DEFAULT_CONTROL_NAMESPACE
+        )
+        .is_err()
+    );
     assert_eq!(config.broker_namespace, "openshell-network");
 }
 
@@ -836,4 +862,20 @@ fn trusted_broker_spec_accepts_only_known_harmless_api_defaults() {
     super::broker_spec::validate(&actual, &expected["spec"]).expect("known API defaults");
     actual["serviceAccountName"] = json!("privileged-identity");
     assert!(super::broker_spec::validate(&actual, &expected["spec"]).is_err());
+}
+
+#[test]
+fn brokered_guest_control_ingress_uses_the_operator_namespace() {
+    let binding = binding();
+    let control = "release-control";
+    let p =
+        broker_manifest::guest_policy(&binding.sandbox_name, "sandbox-tenant", &binding, control);
+    let labels = broker_manifest::guest_labels(&binding.sandbox_name, &binding);
+    assert_eq!(
+        p["spec"]["ingress"][0]["from"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"],
+        control
+    );
+    broker_policy::validate_guest(std::slice::from_ref(&p), &labels, &binding, control)
+        .expect("configured controller allowed");
+    assert!(broker_policy::validate_guest(&[p], &labels, &binding, "other-control").is_err());
 }

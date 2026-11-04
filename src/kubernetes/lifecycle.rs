@@ -117,7 +117,7 @@ pub(super) async fn create(
     let state = broker::create(client, store, &state).await?;
     let network_policy = state.broker.as_ref().map_or_else(
         || manifest::network_policy(&name, &namespace, &control_namespace),
-        |binding| broker_manifest::guest_policy(&name, &namespace, binding),
+        |binding| broker_manifest::guest_policy(&name, &namespace, binding, &control_namespace),
     );
     client.apply(&network_policy).await?;
     if volume.is_none() {
@@ -139,6 +139,7 @@ pub(super) async fn create(
             items,
             &broker_manifest::guest_labels(&name, binding),
             binding,
+            &control_namespace,
         )?;
     } else {
         policy::validate_policies(items, &manifest::labels(&name), &control_namespace)?;
