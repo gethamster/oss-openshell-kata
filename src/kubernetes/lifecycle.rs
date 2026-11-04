@@ -163,6 +163,7 @@ pub(super) async fn create(
             .filter(|v| *v > 0)
             .context("sandbox lease expired before boot")?
     );
+    super::billing::reserve(&state.workspace, launch.nonce).await?;
     client.apply(&pod).await?;
     let ready = wait_ready(client, &state, launch.storage_class, launch.network).await?;
     store.known_hosts(launch.sandbox, &ready.host, &host_key)?;
@@ -195,6 +196,7 @@ async fn wait_ready(
         let pod = client
             .required("pod", Some(&state.name), Some(&state.namespace))
             .await?;
+        super::billing::observe(&state.workspace, &pod).await?;
         enforce_lease_at(client, state, &pod, lease::now()?).await?;
         ensure!(pod["status"]["phase"] != "Failed", "guest boot failed");
         if pod["status"]["phase"] == "Running"
@@ -248,6 +250,9 @@ pub(super) async fn stop(
         }
     }
     client.delete("pod", &state.name, &state.namespace).await?;
+    if let Some(generation) = &state.launch_nonce {
+        super::billing::release(generation).await?;
+    }
     if delete {
         for kind in ["secret", "pvc", "networkpolicy"] {
             client.delete(kind, &state.name, &state.namespace).await?;

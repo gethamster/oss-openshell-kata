@@ -72,6 +72,12 @@ pub(super) async fn reconcile(
     let pods = inventory["items"]
         .as_array()
         .context("invalid Pod inventory")?;
+    if super::billing::reconcile(client, workspace, pods)
+        .await
+        .is_err()
+    {
+        eprintln!("billing reconciliation needs retry");
+    }
     let mut summary = Summary {
         observed: pods.len(),
         ..Default::default()
@@ -85,6 +91,11 @@ pub(super) async fn reconcile(
         match operation(pod, &namespace, now) {
             Ok((true, _)) => operations.push((pod, None)),
             Ok((false, patch)) => {
+                if super::billing::observe(workspace, pod).await.is_err() {
+                    // Fail closed for paid compute; the normal reaper keeps its volume.
+                    operations.push((pod, None));
+                    continue;
+                }
                 summary.unexpired += 1;
                 if let Some(patch) = patch {
                     operations.push((pod, Some(patch)));
