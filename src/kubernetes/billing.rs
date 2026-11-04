@@ -17,6 +17,25 @@ struct Config {
     url: String,
     token_file: PathBuf,
     outbox_dir: PathBuf,
+    #[serde(default)]
+    ca_pem: Option<String>,
+}
+fn http_client(ca_pem: Option<&str>) -> Result<reqwest::Client> {
+    openshell_crypto::tls::ensure_default_provider();
+    let mut builder = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(5));
+    if let Some(pem) = ca_pem {
+        ensure!(pem.len() <= 65_536, "billing CA bundle is too large");
+        let roots = reqwest::Certificate::from_pem_bundle(pem.as_bytes())?;
+        ensure!(!roots.is_empty(), "billing CA bundle is empty");
+        builder = builder.tls_built_in_root_certs(false);
+        for root in roots {
+            builder = builder.add_root_certificate(root);
+        }
+    }
+    Ok(builder.build()?)
 }
 struct Billing {
     config: Config,
@@ -51,11 +70,7 @@ impl Billing {
         ensure!(token.len() >= 32, "invalid billing authority");
         fs::create_dir_all(&config.outbox_dir)?;
         fs::set_permissions(&config.outbox_dir, fs::Permissions::from_mode(0o700))?;
-        let http = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(5))
-            .build()?;
+        let http = http_client(config.ca_pem.as_deref())?;
         Ok(Some(Self {
             config,
             token,
@@ -224,4 +239,33 @@ pub(super) async fn reconcile(client: &Client, workspace: &str, _pods: &[Value])
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn billing_client_starts_without_a_process_provider() {
+        const CHILD: &str = "KATA_BILLING_PROVIDER_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert!(super::http_client(None).is_ok());
+            assert!(super::http_client(Some("")).is_err());
+            assert!(super::http_client(Some("not a CA certificate")).is_err());
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "kubernetes::billing::tests::billing_client_starts_without_a_process_provider",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("fresh billing process");
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

@@ -16,6 +16,7 @@ futures = "0.3"
 # Released OpenShell used by Standalone (v0.1.6-system.2): provider credential
 # state, placeholder substitution and the proxy TLS termination primitives.
 openshell-core = { git = "https://github.com/gethamster/oss-openshell", rev = "30a2f0b27174d5e65fcc6c82a5de20175c9f7ca5", default-features = false }
+openshell-crypto = { git = "https://github.com/gethamster/oss-openshell", rev = "30a2f0b27174d5e65fcc6c82a5de20175c9f7ca5" }
 openshell-supervisor-network = { git = "https://github.com/gethamster/oss-openshell", rev = "30a2f0b27174d5e65fcc6c82a5de20175c9f7ca5" }
 flate2 = "1"
 httparse = "1"
