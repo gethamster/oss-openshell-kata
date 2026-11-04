@@ -460,8 +460,13 @@ pub async fn quiesce(workspace: &Workspace) -> Result<()> {
         })?;
         if !active {
             stop_holders(workspace).await?;
-            verify_quiescent(workspace)?;
-            return Ok(());
+            match verify_quiescent(workspace) {
+                Ok(()) => return Ok(()),
+                // An owner shell can enter hold just after its command drains.
+                // Reconcile that late holder; never exempt an unknown process.
+                Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
+                Err(_) => {}
+            }
         }
         ensure!(
             tokio::time::Instant::now() < deadline,
