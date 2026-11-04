@@ -67,7 +67,7 @@ pub struct Config {
     #[arg(long)]
     pub guest_image: Option<String>,
     /// Further operator-pinned immutable guest images a sandbox template may select,
-    /// each under the same VM policy as the default `--guest-image`.
+    /// each under the same enforced runtime profile as the default `--guest-image`.
     #[arg(long = "additional-guest-image")]
     pub additional_guest_images: Vec<String>,
     /// Trusted private Pod network; workload requests cannot select the route.
@@ -130,13 +130,12 @@ impl Config {
             crate::kubernetes::HostedNetworkConfig::load(path)?;
         }
         if !self.additional_guest_images.is_empty() {
-            if self.runtime_profile != RuntimeProfile::Local
-                || self.guest_image.is_none()
-                || self.vm_policy.is_none()
+            if self.guest_image.is_none()
                 || self.prototype_policy_mode
+                || (self.runtime_profile == RuntimeProfile::Local && self.vm_policy.is_none())
             {
                 bail!(
-                    "additional guest images require the enforced local VM profile and a default guest image"
+                    "additional guest images require an enforced runtime profile and a default guest image"
                 );
             }
             for image in &self.additional_guest_images {
@@ -250,18 +249,19 @@ impl Config {
                 }
             }
             RuntimeProfile::Kubernetes => {
+                let selected = self.for_sandbox(sandbox);
                 if let Some(path) = &self.hosted_network_config {
                     let operator = crate::kubernetes::HostedNetworkConfig::load(path)?;
                     crate::hosted::validate_brokered_request(
                         sandbox,
-                        self.guest_image.as_deref().unwrap_or(""),
+                        selected.guest_image.as_deref().unwrap_or(""),
                         &operator.operator_ceiling,
                     )
                     .map(|_| ())
                 } else {
                     crate::hosted::validate_request(
                         sandbox,
-                        self.guest_image.as_deref().unwrap_or(""),
+                        selected.guest_image.as_deref().unwrap_or(""),
                     )
                 }
             }
