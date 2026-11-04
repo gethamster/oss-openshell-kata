@@ -114,7 +114,7 @@ fn complete_v2_proof_fixture_runs_with_explicit_child_environment() {
         ),
         (
             "guest-policies.json",
-            json!({"items":[broker_manifest::guest_policy(&state.name,&state.namespace,b, super::policy::DEFAULT_CONTROL_NAMESPACE)]}),
+            json!({"items":[broker_manifest::guest_policy(&state.name,&state.namespace,b, kube::policy::DEFAULT_CONTROL_NAMESPACE)]}),
         ),
         (
             "broker-policies.json",
@@ -388,7 +388,7 @@ fn network_peers_bind_full_generation_labels_and_exact_namespace_names() {
         &b.sandbox_name,
         &b.source_namespace,
         &b,
-        super::policy::DEFAULT_CONTROL_NAMESPACE,
+        kube::policy::DEFAULT_CONTROL_NAMESPACE,
     );
     assert_eq!(
         p["spec"]["egress"][0]["to"][0]["namespaceSelector"]["matchLabels"],
@@ -406,7 +406,7 @@ fn network_peers_bind_full_generation_labels_and_exact_namespace_names() {
                 std::slice::from_ref(&p),
                 &missing,
                 &b,
-                super::policy::DEFAULT_CONTROL_NAMESPACE
+                kube::policy::DEFAULT_CONTROL_NAMESPACE
             )
             .is_err(),
             "accepted missing {key}"
