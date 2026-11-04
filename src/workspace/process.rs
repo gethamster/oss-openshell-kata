@@ -11,6 +11,10 @@ use std::{
 };
 use uuid::Uuid;
 
+#[cfg(target_os = "linux")]
+#[path = "process_cancellation.rs"]
+mod cancellation;
+
 const RECORD_DIRECTORY: &str = ".system-processes";
 const MAX_COMMAND_BYTES: usize = 128 * 1024;
 const MAX_RECORD_BYTES: u64 = 4096;
@@ -75,12 +79,11 @@ pub async fn run_child(workspace: &Workspace, id: &str, command: &str) -> Result
     let command = validate_command(command)?;
     #[cfg(target_os = "linux")]
     {
-        use rustix::process::{Signal, getpid, kill_process_group, setsid};
-        use tokio::signal::unix::{SignalKind, signal};
+        use rustix::process::{getpid, set_child_subreaper, setsid};
         setsid().context("create workspace process session")?;
-        // Register before publishing identity: a cancellation can never arrive
-        // between a visible record and installation of its handler.
-        let mut cancel = signal(SignalKind::user_defined1())?;
+        // Orphaned descendants, including detached sessions, return to this
+        // controller so cancellation can retain kernel child ownership.
+        set_child_subreaper(Some(getpid())).context("retain workspace descendants")?;
         let pid = getpid();
         let record = Record {
             version: 1,
@@ -91,25 +94,7 @@ pub async fn run_child(workspace: &Workspace, id: &str, command: &str) -> Result
         if cancelled(workspace, id)? || frozen(workspace)? {
             return Ok(137);
         }
-        let mut child = tokio::process::Command::new(&command[0])
-            .args(&command[1..])
-            .env("OPENSHELL_WORKSPACE_COMMAND_ID", id)
-            .env("OPENSHELL_WORKSPACE_ROOT", &workspace.root)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .context("spawn workspace command")?;
-        tokio::select! {
-            biased;
-            _ = cancel.recv() => {
-                // The pinned controller signals its own extant process group.
-                // A separate caller never signals a numeric PGID after a PID race.
-                kill_process_group(pid, Signal::KILL)?;
-                bail!("workspace process group survived cancellation");
-            }
-            result = child.wait() => Ok(exit_code(result?)),
-        }
+        cancellation::run(workspace, id, &command).await
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -118,7 +103,7 @@ pub async fn run_child(workspace: &Workspace, id: &str, command: &str) -> Result
     }
 }
 
-/// Cancel the exact retained controller through a verified Linux pidfd.
+/// Publish cancellation for the exact retained controller.
 ///
 /// # Errors
 /// Rejects forged/stale process identities, unsupported hosts and signal failures.
@@ -139,17 +124,9 @@ pub fn kill(workspace: &Workspace, id: &str) -> Result<()> {
     };
     #[cfg(target_os = "linux")]
     {
-        use rustix::{
-            io::Errno,
-            process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal},
-        };
+        use rustix::process::Pid;
         let pid = Pid::from_raw(i32::try_from(record.pid)?)
             .context("invalid workspace controller PID")?;
-        let descriptor = match pidfd_open(pid, PidfdFlags::empty()) {
-            Ok(value) => value,
-            Err(Errno::SRCH) => return Ok(()),
-            Err(error) => return Err(error.into()),
-        };
         let observed = match identity(pid) {
             Ok(value) => value,
             Err(error) if is_missing(&error) => return Ok(()),
@@ -176,10 +153,9 @@ pub fn kill(workspace: &Workspace, id: &str) -> Result<()> {
                 .any(|pair| pair[0] == b"__run-child" && pair[1] == id.as_bytes()),
             "workspace controller operation changed"
         );
-        match pidfd_send_signal(&descriptor, Signal::USR1) {
-            Ok(()) | Err(Errno::SRCH) => Ok(()),
-            Err(error) => Err(error.into()),
-        }
+        // The controller observes only its operation's durable marker. It
+        // never receives a cross-process numeric-PID or process-group signal.
+        mark_cancelled(workspace, id)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -286,6 +262,28 @@ fn mark_cancelled(workspace: &Workspace, id: &str) -> Result<()> {
     }
 }
 
+// Retain explicit failure evidence: an uncertain drain must never look like
+// an idle source after the controller exits or the transport reconnects.
+fn mark_drain_failed(workspace: &Workspace, id: &str) -> Result<()> {
+    let directory = process_directory(workspace)?;
+    let mut options = super::files::private_file_options();
+    options.write(true).create_new(true);
+    match directory.open_with(format!("{id}.drain-failed"), &options) {
+        Ok(file) => file.sync_all()?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    super::files::sync_directory(&directory)
+}
+
+fn drain_failed(workspace: &Workspace, id: &str) -> Result<bool> {
+    match process_directory(workspace)?.symlink_metadata(format!("{id}.drain-failed")) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn read_record(workspace: &Workspace, id: &str) -> Result<Option<Record>> {
     let directory = process_directory(workspace)?;
     let mut options = super::files::private_file_options();
@@ -310,7 +308,7 @@ fn read_record(workspace: &Workspace, id: &str) -> Result<Option<Record>> {
 }
 
 fn cleanup_record(workspace: &Workspace, id: &str, pid: u32) -> Result<()> {
-    if super::capability::read(workspace, id)?.is_some() {
+    if super::capability::read(workspace, id)?.is_some() || drain_failed(workspace, id)? {
         return Ok(());
     }
     if let Some(record) = read_record(workspace, id)? {
@@ -519,6 +517,12 @@ pub(super) fn verify_quiescent(_workspace: &Workspace) -> Result<()> {
         let mut allowed = ancestors(rustix::process::getpid())?;
         for entry in process_directory(workspace)?.entries()? {
             let name = entry?.file_name();
+            ensure!(
+                !name
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(".drain-failed")),
+                "workspace descendant drain remains unverified"
+            );
             if let Some(id) = name
                 .to_str()
                 .and_then(|name| name.strip_suffix(".hold.json"))

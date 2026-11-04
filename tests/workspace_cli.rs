@@ -261,6 +261,26 @@ mod linux {
     }
 
     #[test]
+    fn cancellation_drains_detached_double_fork_descendants() {
+        let root = tempfile::tempdir().expect("workspace");
+        let marker = root.path().join("detached-pid");
+        let id = Uuid::new_v4().to_string();
+        let child = spawn(root.path(), &id, &[
+            "sh", "-c",
+            "setsid sh -c 'sleep 60 & echo $! > "$1"' sh "$1"; sleep 60",
+            "sh", marker.to_str().expect("path"),
+        ]);
+        wait_for(&marker);
+        let descendant = fs::read_to_string(&marker).expect("detached PID");
+        let output = helper(root.path()).args(["kill", &id]).output().expect("cancel");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let output = child.wait_with_output().expect("drained controller");
+        assert_eq!(output.status.code(), Some(137), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(!std::path::Path::new(&format!("/proc/{}", descendant.trim())).exists(),
+            "detached descendant must be reaped before cancellation succeeds");
+    }
+
+    #[test]
     fn cancellation_before_record_publication_prevents_later_execution() {
         let root = tempfile::tempdir().expect("workspace");
         let id = Uuid::new_v4().to_string();
