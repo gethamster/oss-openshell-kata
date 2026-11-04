@@ -21,6 +21,12 @@ fn deterministic_archives_round_trip_files_modes_links_and_ignore_control_state(
     fs::set_permissions(source.path().join("run"), fs::Permissions::from_mode(0o751))
         .expect("mode");
     symlink("../run", source.path().join(".git/run")).expect("relative link");
+    fs::set_permissions(
+        source.path().join(".git"),
+        fs::Permissions::from_mode(0o555),
+    )
+    .expect("read-only directory mode");
+    let source_path = source.path().to_path_buf();
     let source = Workspace::open(source.path()).expect("source capability");
     let mut archive = Vec::new();
     workspace::export(&source, &mut archive).expect("export");
@@ -35,6 +41,13 @@ fn deterministic_archives_round_trip_files_modes_links_and_ignore_control_state(
     let mut actual = Vec::new();
     workspace::export(&target_workspace, &mut actual).expect("re-export");
     assert_eq!(archive, actual);
+    fs::set_permissions(source_path.join(".git"), fs::Permissions::from_mode(0o755))
+        .expect("restore source cleanup permissions");
+    fs::set_permissions(
+        target.path().join(".git"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("restore target cleanup permissions");
     assert!(!target.path().join("stale").exists());
     assert!(!target.path().join(".system-processes").exists());
     assert_eq!(

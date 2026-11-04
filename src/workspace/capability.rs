@@ -125,6 +125,10 @@ fn local_information(args: &[String], compose: bool) -> bool {
     args.is_empty()
         || matches!(args, [one] if one == "--help" || one == "-h" || one == "--version" || one == "-v" || (compose && one == "version"))
         || matches!(args, [one, two] if !compose && one == "compose" && matches!(two.as_str(), "version" | "--help" | "-h"))
+        || matches!(args, [_, help] if matches!(help.as_str(), "--help" | "-h"))
+        || matches!(args, [group, _, help] if !compose
+            && matches!(group.as_str(), "compose" | "buildx" | "container" | "image" | "network" | "volume" | "system" | "context" | "plugin" | "manifest" | "service" | "stack" | "swarm" | "node" | "secret" | "config" | "trust")
+            && matches!(help.as_str(), "--help" | "-h"))
 }
 
 #[cfg(test)]
@@ -140,7 +144,9 @@ mod tests {
             (vec!["version"], false, false),
             (vec!["version"], true, true),
             (vec!["compose", "up"], false, false),
-            (vec!["run", "--help"], false, false),
+            (vec!["run", "--help"], false, true),
+            (vec!["run", "alpine", "--help"], false, false),
+            (vec!["compose", "up", "--help"], false, true),
         ] {
             let args = args.into_iter().map(String::from).collect::<Vec<_>>();
             assert_eq!(local_information(&args, compose), expected, "{args:?}");

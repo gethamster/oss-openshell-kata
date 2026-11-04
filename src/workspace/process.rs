@@ -401,6 +401,17 @@ pub async fn quiesce(workspace: &Workspace) -> Result<()> {
         }
     }
     for id in &ids {
+        #[cfg(target_os = "linux")]
+        if let Some(record) = read_record(workspace, id)? {
+            let live = i32::try_from(record.pid)
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+                .and_then(|pid| identity(pid).ok())
+                .is_some_and(|current| current.start == record.start && current.state != "Z");
+            if !live {
+                continue;
+            }
+        }
         kill(workspace, id)?;
     }
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);

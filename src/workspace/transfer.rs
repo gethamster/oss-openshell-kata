@@ -153,7 +153,7 @@ pub fn import(workspace: &Workspace, input: impl Read) -> Result<()> {
         directory: workspace.directory.open_dir_nofollow(&name)?,
         root: workspace.root.join(&name),
     };
-    let result = import_staged(&staging, input).and_then(|()| {
+    let result = import_staged(&staging, input).and_then(|directories| {
         let names = workspace
             .directory
             .entries()?
@@ -163,11 +163,7 @@ pub fn import(workspace: &Workspace, input: impl Read) -> Result<()> {
             if existing.to_str().is_some_and(reserved) {
                 continue;
             }
-            if workspace.directory.symlink_metadata(&existing)?.is_dir() {
-                workspace.directory.remove_dir_all(&existing)?;
-            } else {
-                workspace.directory.remove_file(&existing)?;
-            }
+            remove_tree(&workspace.directory, &existing)?;
         }
         for entry in staging.directory.entries()? {
             let entry = entry?;
@@ -175,13 +171,29 @@ pub fn import(workspace: &Workspace, input: impl Read) -> Result<()> {
                 .directory
                 .rename(entry.file_name(), &workspace.directory, entry.file_name())?;
         }
+        restore_directory_modes(workspace, directories)?;
         super::files::sync_directory(&workspace.directory)
     });
-    workspace.directory.remove_dir_all(&name)?;
+    remove_tree(&workspace.directory, Path::new(&name).as_os_str())?;
     result
 }
 
-fn import_staged(workspace: &Workspace, input: impl Read) -> Result<()> {
+fn remove_tree(parent: &Dir, name: &std::ffi::OsStr) -> Result<()> {
+    if parent.symlink_metadata(name)?.is_dir() {
+        let directory = parent.open_dir_nofollow(name)?;
+        let mode = directory.dir_metadata()?.permissions().mode();
+        directory.set_permissions(".", Permissions::from_mode(mode | 0o700))?;
+        for entry in directory.entries()? {
+            remove_tree(&directory, &entry?.file_name())?;
+        }
+        parent.remove_dir(name)?;
+    } else {
+        parent.remove_file(name)?;
+    }
+    Ok(())
+}
+
+fn import_staged(workspace: &Workspace, input: impl Read) -> Result<Vec<(String, u32)>> {
     let mut archive = tar::Archive::new(input.take(MAX_WIRE + 1));
     let mut names = BTreeSet::new();
     let mut directories = Vec::new();
@@ -249,6 +261,13 @@ fn import_staged(workspace: &Workspace, input: impl Read) -> Result<()> {
         remaining.limit() > 0,
         "workspace archive wire limit exceeded"
     );
+    Ok(directories)
+}
+
+fn restore_directory_modes(
+    workspace: &Workspace,
+    mut directories: Vec<(String, u32)>,
+) -> Result<()> {
     directories.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
     for (name, mode) in directories {
         let (parent, leaf) = workspace.parent(&format!("/sandbox/{name}"), false)?;
