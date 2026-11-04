@@ -21,8 +21,6 @@ struct Record {
     version: u32,
     pid: u32,
     start: u64,
-    #[serde(default)]
-    ancestors: Vec<Ancestor>,
 }
 
 /// Run a command beneath a session leader whose identity can be cancelled safely.
@@ -88,7 +86,6 @@ pub async fn run_child(workspace: &Workspace, id: &str, command: &str) -> Result
             version: 1,
             pid: pid.as_raw_nonzero().get() as u32,
             start: identity(pid)?.start,
-            ancestors: ancestors(pid)?,
         };
         publish_record(workspace, id, &record)?;
         if cancelled(workspace, id)? || frozen(workspace)? {
@@ -423,27 +420,22 @@ pub async fn quiesce(workspace: &Workspace) -> Result<()> {
             .and_then(|name| name.strip_suffix(".hold.json"))
         {
             validate_id(id)?;
-            if let Some(record) = read_record(workspace, &format!("{id}.hold"))? {
-                if holding(&record, id)? {
-                    allowed.extend(record.ancestors);
-                    allowed.push(Ancestor {
-                        pid: record.pid,
-                        start: record.start,
-                    });
-                }
+            if let Some(record) = read_record(workspace, &format!("{id}.hold"))?
+                && holding(&record, id)?
+            {
+                allowed.push(Ancestor {
+                    pid: record.pid,
+                    start: record.start,
+                });
             }
         }
-        if let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".json")) {
-            if Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id) {
-                ids.push(id.to_owned());
-            }
+        if let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".json"))
+            && Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id)
+        {
+            ids.push(id.to_owned());
         }
     }
     for id in &ids {
-        #[cfg(target_os = "linux")]
-        if let Some(record) = read_record(workspace, id)? {
-            allowed.extend(record.ancestors);
-        }
         kill(workspace, id)?;
     }
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -451,16 +443,15 @@ pub async fn quiesce(workspace: &Workspace) -> Result<()> {
         let active = ids.iter().try_fold(false, |active, id| -> Result<bool> {
             let record = read_record(workspace, id)?;
             #[cfg(target_os = "linux")]
-            if let Some(record) = record {
-                if let Some(pid) = i32::try_from(record.pid)
+            if let Some(record) = record
+                && let Some(pid) = i32::try_from(record.pid)
                     .ok()
                     .and_then(rustix::process::Pid::from_raw)
-                {
-                    return Ok(active
-                        || identity(pid).is_ok_and(|current| {
-                            current.start == record.start && current.state != "Z"
-                        }));
-                }
+            {
+                return Ok(active
+                    || identity(pid).is_ok_and(|current| {
+                        current.start == record.start && current.state != "Z"
+                    }));
             }
             #[cfg(not(target_os = "linux"))]
             let _ = record;
@@ -488,6 +479,7 @@ pub fn thaw(workspace: &Workspace) -> Result<()> {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, Deserialize, Serialize)]
 struct Ancestor {
     pid: u32,
@@ -594,7 +586,6 @@ pub async fn hold(_workspace: &Workspace, id: &str) -> Result<()> {
                 version: 1,
                 pid: pid.as_raw_nonzero().get() as u32,
                 start: identity(pid)?.start,
-                ancestors: ancestors(pid)?,
             },
         )?;
         std::future::pending::<()>().await;

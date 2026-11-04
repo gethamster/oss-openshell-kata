@@ -46,7 +46,8 @@ mod tests {
         outer.insert("environment".into(), Value::Object(inner.clone()));
         outer.insert("list".into(), Value::Array(vec![Value::Object(inner)]));
         assert_eq!(
-            String::from_utf8(to_vec(&Value::Object(outer)).unwrap()).unwrap(),
+            String::from_utf8(to_vec(&Value::Object(outer)).expect("serialize canonical object"))
+                .expect("canonical JSON is UTF-8"),
             r#"{"environment":{"a":2,"z":1},"list":[{"a":2,"z":1}],"version":2}"#
         );
     }
