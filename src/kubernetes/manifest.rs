@@ -56,7 +56,7 @@ pub(super) fn pod(name: &str, namespace: &str, image: &str) -> Value {
                 "capabilities":{"drop":["ALL"],"add":["CHOWN"]}},
             "volumeMounts":[{"name":"data","mountPath":"/data"}]}],
         "containers":[{"name":"guest","image":image,"securityContext":{"privileged":true},
-            "resources":resources,"env":[{"name":"DOCKER_TLS_CERTDIR","value":""},
+            "resources":resources,"env":[{"name":"DOCKER_TLS_CERTDIR"},
                 {"name":"KATA_DOCKER_STORAGE_DRIVER","value":"vfs"}],
             "command":["/usr/local/sbin/openshell-kata-init"],
             "readinessProbe":{"exec":{"command":["sh","-ec",r#"test -n "$(ss -H -lnt 'sport = :22')""#]},"initialDelaySeconds":2,"periodSeconds":2},
