@@ -28,6 +28,7 @@ fn config(root: &Path) -> Config {
         recovery_dir: Some(root.join("registry")),
         hosted_network_config: None,
         max_sandboxes: None,
+        workspace_capacities: Vec::new(),
     }
 }
 fn intent() -> Retained {
@@ -276,6 +277,7 @@ fn native_config(root: &Path) -> anyhow::Result<Config> {
         guest_network_cidr: None,
         additional_guest_images: Vec::new(),
         max_sandboxes: Some(4),
+        workspace_capacities: Vec::new(),
         ..config(root)
     })
 }
@@ -292,6 +294,7 @@ fn native_capacity_follows_the_operator_setting() -> anyhow::Result<()> {
     let root = tempfile::tempdir()?;
     let config = Config {
         max_sandboxes: Some(48),
+        workspace_capacities: Vec::new(),
         ..native_config(root.path())?
     };
     let store = Store::for_config(&config)?;
@@ -306,6 +309,7 @@ fn native_capacity_follows_the_operator_setting() -> anyhow::Result<()> {
 
     let lowered = Config {
         max_sandboxes: Some(8),
+        workspace_capacities: Vec::new(),
         ..config.clone()
     };
     assert!(
@@ -314,6 +318,7 @@ fn native_capacity_follows_the_operator_setting() -> anyhow::Result<()> {
     );
     let raised = Config {
         max_sandboxes: Some(64),
+        workspace_capacities: Vec::new(),
         ..config
     };
     let raised_store = Store::for_config(&raised)?;
@@ -333,6 +338,7 @@ fn native_capacity_is_required_bounded_and_native_only() -> anyhow::Result<()> {
     for capacity in [1, 64] {
         Config {
             max_sandboxes: Some(capacity),
+            workspace_capacities: Vec::new(),
             ..native.clone()
         }
         .validate()?;
@@ -340,14 +346,17 @@ fn native_capacity_is_required_bounded_and_native_only() -> anyhow::Result<()> {
     for invalid in [
         Config {
             max_sandboxes: None,
+            workspace_capacities: Vec::new(),
             ..native.clone()
         },
         Config {
             max_sandboxes: Some(0),
+            workspace_capacities: Vec::new(),
             ..native.clone()
         },
         Config {
             max_sandboxes: Some(65),
+            workspace_capacities: Vec::new(),
             ..native.clone()
         },
     ] {
@@ -356,6 +365,7 @@ fn native_capacity_is_required_bounded_and_native_only() -> anyhow::Result<()> {
     }
     let hosted = Config {
         max_sandboxes: Some(4),
+        workspace_capacities: Vec::new(),
         ..config(root.path())
     };
     assert!(
@@ -642,5 +652,54 @@ fn records_the_operator_profile_no_longer_admits_are_retired_not_fatal() -> anyh
             .as_ref()
             .is_some_and(|spec| spec.launch_authentication.is_empty())
     }));
+    Ok(())
+}
+
+#[test]
+fn hosted_workspace_capacity_is_scoped_and_preserves_existing_records() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut config = config(root.path());
+    config.workspace_capacities = vec!["tenant-a=3".into()];
+    let store = Store::for_config(&config)?;
+    for (workspace, count) in [("tenant-a", 3), ("tenant-b", 2)] {
+        for index in 0..count {
+            let mut record = intent();
+            record.sandbox.id = format!("{workspace}-{index}");
+            record.sandbox.workspace = workspace.into();
+            store.save(&record)?;
+        }
+        let mut rejected = intent();
+        rejected.sandbox.id = format!("{workspace}-overflow");
+        rejected.sandbox.workspace = workspace.into();
+        assert!(store.save(&rejected).is_err());
+    }
+    config.workspace_capacities.clear();
+    let lowered = Store::for_config(&config)?;
+    assert_eq!(lowered.load(&config)?.admitted.len(), 5);
+    let mut retained = intent();
+    retained.sandbox.id = "tenant-a-0".into();
+    lowered.save(&retained)?;
+    assert_eq!(lowered.load(&config)?.admitted.len(), 5);
+    Ok(())
+}
+
+#[test]
+fn hosted_workspace_capacity_rejects_invalid_or_duplicate_overrides() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    for entries in [
+        vec!["tenant-a=0"],
+        vec!["tenant-a=65"],
+        vec!["tenant-a"],
+        vec!["../tenant=3"],
+        vec!["tenant-a=3", "tenant-a=4"],
+    ] {
+        let mut config = config(root.path());
+        config.workspace_capacities = entries.into_iter().map(str::to_owned).collect();
+        assert!(config.validate().is_err());
+        assert!(Store::for_config(&config).is_err());
+    }
+    let mut native = native_config(root.path())?;
+    native.workspace_capacities = vec!["tenant-a=3".into()];
+    assert!(native.validate().is_err());
     Ok(())
 }

@@ -24,6 +24,7 @@ fn config(root: &std::path::Path) -> Arc<Config> {
         recovery_dir: None,
         hosted_network_config: None,
         max_sandboxes: None,
+        workspace_capacities: Vec::new(),
     })
 }
 fn sandbox(authentication: Vec<u8>) -> c::DriverSandbox {

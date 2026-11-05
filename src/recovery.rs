@@ -9,6 +9,7 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     fs,
     io::{Read, Write},
     os::unix::fs::PermissionsExt,
@@ -115,6 +116,7 @@ pub struct Store {
     native_fingerprint: Option<String>,
     /// Native node capacity; `None` keeps the pilot per-workspace rule.
     native_capacity: Option<usize>,
+    workspace_capacities: BTreeMap<String, usize>,
 }
 
 impl Store {
@@ -124,6 +126,7 @@ impl Store {
             mutation: Arc::default(),
             native_fingerprint: None,
             native_capacity: None,
+            workspace_capacities: BTreeMap::new(),
         }
     }
 
@@ -132,7 +135,7 @@ impl Store {
     /// Native records bind to the pinned policy, gateway CA and lifecycle selection
     /// and are capped by the operator's `--max-sandboxes`. The capacity is not part
     /// of the binding, so raising it keeps retained intent. Legacy hosted records
-    /// retain their existing two-per-workspace contract.
+    /// retain two per workspace unless the operator explicitly overrides that workspace.
     ///
     /// # Errors
     /// Rejects missing or unsafe native configuration and unreadable public CA files.
@@ -152,7 +155,10 @@ impl Store {
                 ..Self::new(root)
             })
         } else {
-            Ok(Self::new(root))
+            Ok(Self {
+                workspace_capacities: config.configured_workspace_capacities()?,
+                ..Self::new(root)
+            })
         }
     }
 
@@ -272,9 +278,14 @@ impl Store {
                 "native node already retains its capacity of {capacity} sandboxes"
             );
         } else {
+            let capacity = self
+                .workspace_capacities
+                .get(&sanitized.sandbox.workspace)
+                .copied()
+                .unwrap_or(2);
             ensure!(
-                existing || workspace_records < 2,
-                "pilot workspace already has two retained sandboxes"
+                existing || workspace_records < capacity,
+                "workspace already retains its capacity of {capacity} sandboxes"
             );
         }
         let replaced = inventory

@@ -384,6 +384,7 @@ async fn native_recovery_stops_before_inventory_and_requires_new_authenticated_s
         additional_guest_images: Vec::new(),
         recovery_dir: Some(root.join("native-registry")),
         max_sandboxes: Some(4),
+        workspace_capacities: Vec::new(),
         ..(*fixture.runtime.config).clone()
     });
     let mut route: serde_json::Value = serde_json::from_slice(&fs::read(root.join("route.json"))?)?;
@@ -504,6 +505,7 @@ async fn recovery_retires_sandboxes_the_new_operator_profile_no_longer_admits() 
         additional_guest_images: vec![retired_image.clone()],
         recovery_dir: Some(root.join("native-registry")),
         max_sandboxes: Some(4),
+        workspace_capacities: Vec::new(),
         ..(*fixture.runtime.config).clone()
     };
     let store = Store::for_config(&previous)?;
