@@ -331,7 +331,7 @@ async fn execute_locked(
         Action::Start => {
             if policy.resources != record.policy.resources
                 || policy.filesystem != record.policy.filesystem
-                || !policy.network.tcp_allow.is_empty()
+                || !policy.network.is_deny_all()
             {
                 bail!(
                     "restart requires the same resource/filesystem policy with deny-all networking"

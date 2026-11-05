@@ -274,7 +274,7 @@ impl RuntimeProof {
             );
         }
         let startup = broker.generation == 1
-            && broker.policy.tcp_allow.is_empty()
+            && broker.policy.is_deny_all()
             && broker.authorization_expires_at_unix == 0
             && broker.active_connections == 0
             && expected_policy.is_none();

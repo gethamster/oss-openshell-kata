@@ -545,3 +545,53 @@ async fn poisoned_guard_revokes_authority_without_panicking_control() -> Result<
     assert_eq!(inspect(&broker).await?.authorization_expires_at_unix, 0);
     broker.shutdown().await
 }
+
+async fn connect_status(broker: &HostedBrokerHandle, target: &str) -> Result<String> {
+    let mut socket = TcpStream::connect(broker.local_addr()).await?;
+    socket
+        .write_all(format!("CONNECT {target} HTTP/1.1\r\n\r\n").as_bytes())
+        .await?;
+    let mut reader = BufReader::new(socket);
+    let mut head = String::new();
+    reader.read_line(&mut head).await?;
+    Ok(head)
+}
+
+#[tokio::test]
+async fn public_ports_keep_protected_names_and_denied_addresses_refused() -> Result<()> {
+    let public = NetworkPolicy {
+        tcp_allow_public_ports: vec![443],
+        ..policy()
+    };
+    let config = HostedBrokerConfig {
+        operator_ceiling: public.clone(),
+        initial_ceiling: public.clone(),
+        ..config()
+    };
+    let mut denied = inventory(1);
+    denied.denied_cidrs.push("8.8.8.8/32".into());
+    for (answer, target, allowed) in [
+        ("8.8.4.4:443", "any.example.org:443", true),
+        ("8.8.4.4:443", "any.example.org:80", false),
+        ("8.8.4.4:443", "service.internal.example.com:443", false),
+        ("8.8.4.4:443", "10.0.0.5:443", false),
+        ("169.254.169.254:443", "metadata.example.org:443", false),
+        ("10.1.2.3:443", "rebound.example.org:443", false),
+        ("8.8.8.8:443", "denied.example.org:443", false),
+    ] {
+        let (broker, connects) =
+            fixture(config.clone(), denied.clone(), vec![answer.parse()?]).await?;
+        broker
+            .request(request(&broker, 1, public.clone(), denied.clone()))
+            .await?;
+        let head = connect_status(&broker, target).await?;
+        assert_eq!(
+            head.contains("200"),
+            allowed,
+            "{target} via {answer}: {head}"
+        );
+        assert_eq!(connects.load(Ordering::SeqCst), usize::from(allowed));
+        broker.shutdown().await?;
+    }
+    Ok(())
+}

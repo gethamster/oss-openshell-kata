@@ -120,6 +120,12 @@ destinations, HTTP path restrictions, or arbitrary UDP. The operator ceiling
 lists TCP destinations only; TLS inspection is compiled from native intent
 (below) and never authored in the operator policy.
 
+The optional `tcp_allow_public_ports` list (at most 16 nonzero ports, for
+example `[443, 80]`) admits any public DNS name or global IP literal on those
+ports. It is for build sandboxes only. The broker applies the same resolved
+address checks, never inspects the traffic, and denies the same names. Omitting
+the field keeps the exact behaviour and the existing policy encoding and digest.
+
 ### Native network policy can only narrow the operator ceiling
 
 The operator `tcp_allow` list is a maximum, not automatic permission. A native
@@ -145,7 +151,11 @@ Use an empty protocol or `tcp` and explicit `tls: skip`. Omit the L7-only
 `enforcement` authoring field: the pinned gateway rejects it on TCP rules.
 The runtime rejects audit mode. A single
 port or a list of ports is supported; conflicting simultaneous forms are
-rejected. Every resulting host/port must exist in the operator ceiling.
+rejected. Every resulting host/port must exist in the operator ceiling. A host
+of `**` (or an empty host without `allowed_ips`) requests any public host on
+its ports; each port must be in the ceiling's `tcp_allow_public_ports`. The
+broker still refuses non-global, denied and protected destinations on those
+ports and never inspects them (see [HOSTED.md](HOSTED.md)).
 
 Other endpoint features are rejected on these TCP endpoints, including L7
 rules, credentialed-provider markers, credential binding/signing/rewriting,

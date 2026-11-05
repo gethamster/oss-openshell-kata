@@ -50,6 +50,7 @@ fn compile(
     let ceiling = ceiling.validate()?;
     let mut allowed = BTreeSet::new();
     let mut inspected: BTreeMap<Endpoint, RestAccess> = BTreeMap::new();
+    let mut public_ports = BTreeSet::new();
     for (name, rule) in &native.network_policies {
         if inspection && name.starts_with(PROVIDER_RULE_PREFIX) {
             continue;
@@ -78,6 +79,19 @@ fn compile(
             };
             for port in ports {
                 let port = u16::try_from(port).context("invalid TCP port")?;
+                if is_public_host(&endpoint.host) {
+                    if access.is_some() {
+                        bail!("public-host endpoints cannot be inspected; use tls skip");
+                    }
+                    if port == 0 {
+                        bail!("TCP destination port must be nonzero");
+                    }
+                    if !ceiling.allows_public_port(port) {
+                        bail!("native public port exceeds operator network ceiling");
+                    }
+                    public_ports.insert(port);
+                    continue;
+                }
                 let requested = NetworkPolicy {
                     tcp_allow: vec![Endpoint {
                         host: endpoint.host.clone(),
@@ -121,9 +135,16 @@ fn compile(
                 access,
             })
             .collect(),
+        tcp_allow_public_ports: public_ports.into_iter().collect(),
     };
     policy.validate()?;
     Ok(policy)
+}
+
+/// `**` (every name) or an empty host without `allowed_ips` selects any
+/// public destination on the endpoint's ports.
+fn is_public_host(host: &str) -> bool {
+    host == "**" || host.is_empty()
 }
 
 /// The supported credential-bearing shape: L7 REST with TLS terminated by the

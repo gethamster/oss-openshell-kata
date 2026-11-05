@@ -210,7 +210,7 @@ pub(super) async fn create_with_config(
             {
                 ensure!(
                     response.generation == 1
-                        && response.policy.tcp_allow.is_empty()
+                        && response.policy.is_deny_all()
                         && response.authorization_expires_at_unix == 0,
                     "broker did not boot denied"
                 );
