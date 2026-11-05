@@ -49,9 +49,38 @@ pub(super) fn pvc(
         "resources":{"requests":{"storage":shape.storage()}}}})
 }
 
-pub(super) fn pod(name: &str, namespace: &str, image: &str, shape: &ResourceShape) -> Value {
+/// Guest path of the raw Docker disk. A block volume reaches the Kata VM as a
+/// virtio disk, so the guest formats it and Docker uses overlay2 instead of VFS.
+pub(super) const DOCKER_DEVICE: &str = "/dev/openshell-docker";
+
+pub(super) fn docker_pvc_name(name: &str) -> String {
+    format!("{name}-docker")
+}
+
+/// The private raw disk for the guest Docker data root. It has the shape's size.
+pub(super) fn docker_pvc(
+    name: &str,
+    namespace: &str,
+    storage_class: &str,
+    shape: &ResourceShape,
+) -> Value {
+    let mut volume = pvc(name, namespace, storage_class, shape);
+    volume["metadata"]["name"] = json!(docker_pvc_name(name));
+    volume["spec"]["volumeMode"] = json!("Block");
+    volume
+}
+
+/// `docker_disk` selects the raw Docker disk. Without it, Docker data stays on
+/// the shared `data` volume with VFS, as for guests launched before the disk.
+pub(super) fn pod(
+    name: &str,
+    namespace: &str,
+    image: &str,
+    shape: &ResourceShape,
+    docker_disk: bool,
+) -> Value {
     let resources = json!({"requests":limits(shape),"limits":limits(shape)});
-    json!({"apiVersion":"v1","kind":"Pod","metadata":metadata(name,namespace),"spec":{
+    let mut pod = json!({"apiVersion":"v1","kind":"Pod","metadata":metadata(name,namespace),"spec":{
         "runtimeClassName":RUNTIME,"serviceAccountName":"openshell-sandbox",
         "automountServiceAccountToken":false,"enableServiceLinks":false,"restartPolicy":"Never",
         "terminationGracePeriodSeconds":15,"nodeSelector":{"pool":"kata-workers"},
@@ -72,5 +101,19 @@ pub(super) fn pod(name: &str, namespace: &str, image: &str, shape: &ResourceShap
                 {"name":"data","mountPath":"/var/lib/docker","subPath":"docker"},
                 {"name":"ssh","mountPath":"/run/guest-ssh","readOnly":true}]}],
         "volumes":[{"name":"data","persistentVolumeClaim":{"claimName":name}},
-            {"name":"ssh","secret":{"secretName":name,"defaultMode":384}}]}})
+            {"name":"ssh","secret":{"secretName":name,"defaultMode":384}}]}});
+    if docker_disk {
+        let guest = &mut pod["spec"]["containers"][0];
+        guest["env"][1]["value"] = json!("overlay2");
+        guest["volumeMounts"]
+            .as_array_mut()
+            .expect("static guest mounts")
+            .retain(|mount| mount["subPath"] != "docker");
+        guest["volumeDevices"] = json!([{"name":"docker","devicePath":DOCKER_DEVICE}]);
+        pod["spec"]["volumes"]
+            .as_array_mut()
+            .expect("static guest volumes")
+            .push(json!({"name":"docker","persistentVolumeClaim":{"claimName":docker_pvc_name(name)}}));
+    }
+    pod
 }

@@ -444,6 +444,7 @@ fn state_for(f: &Mock, folder: &std::path::Path) -> super::model::State {
         runtime_identity: String::new(),
         launch_nonce: Some(f.binding.launch_nonce.clone()),
         owns_volume_for_launch: false,
+        docker_disk: false,
         expires_at: Some(
             f.binding
                 .broker_config

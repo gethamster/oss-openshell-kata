@@ -34,8 +34,15 @@ adds another allowed principal and is not accepted from workload requests.
 
 The launcher derives `sandbox-<workspace>` from gateway-owned metadata and
 checks existing namespace labels. It never creates namespaces. Each sandbox
-has a Kata Pod, a private RWO PVC, an SSH Secret and selecting network policy.
-The PVC holds `/sandbox` and the guest Docker data root `/var/lib/docker`.
+has a Kata Pod, two private RWO PVCs, an SSH Secret and selecting network policy.
+The `<name>` PVC holds `/sandbox`. The `<name>-docker` PVC is a raw block volume
+(`volumeMode: Block`) of the same size that reaches the VM as
+`/dev/openshell-docker`. The guest formats it as ext4 on first boot and mounts
+it at `/var/lib/docker`, so Docker uses `overlay2`. A shared-folder PVC would
+force `vfs`, which stores a full file system copy per image layer. The Docker
+disk is a cache: deletion and a failed first launch remove it, and a relaunch
+keeps it. Guests launched before this disk keep Docker data on the `<name>` PVC
+with `vfs` until they are relaunched.
 Ephemeral storage uses Kubernetes accounting and eviction, not an instantaneous
 block quota. The local block-backed profile separately supports one vCPU and
 2 GiB memory/disk. Operator-owned templates must match the selected shape.

@@ -11,6 +11,8 @@ use sha2::{Digest, Sha256};
 pub(super) struct Observations {
     pub(super) pod: Value,
     pub(super) pvc: Value,
+    /// The raw Docker disk; `None` for a guest launched before it.
+    pub(super) docker_pvc: Option<Value>,
     pub(super) node: Value,
     pub(super) runtime: Value,
     pub(super) policies: Vec<Value>,
@@ -54,6 +56,19 @@ pub(super) async fn verify_with_nonce(
     let pvc = client
         .required("pvc", Some(&state.name), Some(&state.namespace))
         .await?;
+    let docker_pvc = if state.docker_disk {
+        Some(
+            client
+                .required(
+                    "pvc",
+                    Some(&manifest::docker_pvc_name(&state.name)),
+                    Some(&state.namespace),
+                )
+                .await?,
+        )
+    } else {
+        None
+    };
     let node = client.required("node", Some(node_name), None).await?;
     let runtime = client
         .required("runtimeclass", Some(manifest::runtime(state)), None)
@@ -70,6 +85,7 @@ pub(super) async fn verify_with_nonce(
         &Observations {
             pod,
             pvc,
+            docker_pvc,
             node,
             runtime,
             policies,
@@ -175,6 +191,8 @@ pub(super) fn validate(
     ensure!(
         containers[0]["command"] == expected["spec"]["containers"][0]["command"]
             && containers[0]["volumeMounts"] == expected["spec"]["containers"][0]["volumeMounts"]
+            && containers[0].get("volumeDevices")
+                == expected["spec"]["containers"][0].get("volumeDevices")
             && (state.broker.is_none()
                 || containers[0]["env"] == expected["spec"]["containers"][0]["env"]),
         "guest boot or storage binding changed"
@@ -183,7 +201,7 @@ pub(super) fn validate(
         spec["serviceAccountName"] == "openshell-sandbox",
         "guest service identity changed"
     );
-    validate_volumes(spec, &state.name)?;
+    validate_volumes(spec, &state.name, state.docker_disk)?;
     let init = spec["initContainers"]
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("invalid storage initializer"))?;
@@ -201,6 +219,13 @@ pub(super) fn validate(
             && pvc["resources"]["requests"]["storage"] == shape.storage(),
         "private storage boundary changed"
     );
+    match (&observed.docker_pvc, state.docker_disk) {
+        (Some(volume), true) => {
+            super::lifecycle::check_docker_volume(volume, &state.name, storage_class, &shape)?
+        }
+        (None, false) => {}
+        _ => anyhow::bail!("Docker disk boundary differs"),
+    }
     let status = &observed.pod["status"];
     let statuses = status["containerStatuses"].as_array();
     ensure!(
@@ -293,12 +318,12 @@ pub(super) fn validate(
     ))
 }
 
-fn validate_volumes(spec: &Value, name: &str) -> Result<()> {
+fn validate_volumes(spec: &Value, name: &str, docker_disk: bool) -> Result<()> {
     let volumes = spec["volumes"]
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("invalid guest volumes"))?;
     ensure!(
-        volumes.len() == 2
+        volumes.len() == 2 + usize::from(docker_disk)
             && volumes
                 .iter()
                 .all(|v| v.get("hostPath").is_none() && v.get("projected").is_none()),
@@ -308,7 +333,13 @@ fn validate_volumes(spec: &Value, name: &str) -> Result<()> {
     let ssh = volumes.iter().find(|v| v["name"] == "ssh");
     ensure!(
         data.is_some_and(|v| v["persistentVolumeClaim"]["claimName"] == name)
-            && ssh.is_some_and(|v| v["secret"]["secretName"] == name),
+            && ssh.is_some_and(|v| v["secret"]["secretName"] == name)
+            && (!docker_disk
+                || volumes.iter().any(|v| {
+                    v["name"] == "docker"
+                        && v["persistentVolumeClaim"]["claimName"]
+                            == manifest::docker_pvc_name(name)
+                })),
         "private volume identity changed"
     );
     Ok(())

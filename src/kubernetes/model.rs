@@ -30,6 +30,10 @@ pub(super) struct State {
     /// state stays byte-identical to earlier releases.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) resource_shape: Option<ResourceShape>,
+    /// Docker data is on its own raw disk (overlay2). Absent for guests launched
+    /// before the disk, which keep VFS on the shared volume until relaunch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) docker_disk: bool,
     pub(super) private_key_path: PathBuf,
     pub(super) known_hosts_path: PathBuf,
 }
