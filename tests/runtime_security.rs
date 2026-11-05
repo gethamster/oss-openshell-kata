@@ -71,7 +71,6 @@ fn setup() -> (tempfile::TempDir, StateDirectory, Settings) {
         node_binary: PathBuf::from("/does/not/exist"),
         image: None,
         max_sandboxes: None,
-        workspace_capacities: Vec::new(),
     };
     (temp, state, settings)
 }
@@ -124,7 +123,6 @@ async fn unusable_socket_path_is_rejected_before_node_operations_or_state_record
         node_binary: "/unused".into(),
         image: None,
         max_sandboxes: None,
-        workspace_capacities: Vec::new(),
     };
     let id = uuid::Uuid::new_v4().to_string();
     let policy_file = temp.path().join("policy.json");

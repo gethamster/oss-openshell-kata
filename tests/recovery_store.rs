@@ -684,8 +684,8 @@ fn hosted_workspace_capacity_is_scoped_and_preserves_existing_records() -> anyho
 }
 
 #[test]
-fn hosted_workspace_capacity_rejects_invalid_or_duplicate_overrides() {
-    let root = tempfile::tempdir().unwrap();
+fn hosted_workspace_capacity_rejects_invalid_or_duplicate_overrides() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
     for entries in [
         vec!["tenant-a=0"],
         vec!["tenant-a=65"],
@@ -698,7 +698,8 @@ fn hosted_workspace_capacity_rejects_invalid_or_duplicate_overrides() {
         assert!(config.validate().is_err());
         assert!(Store::for_config(&config).is_err());
     }
-    let mut native = native_config(root.path()).unwrap();
+    let mut native = native_config(root.path())?;
     native.workspace_capacities = vec!["tenant-a=3".into()];
     assert!(native.validate().is_err());
+    Ok(())
 }
