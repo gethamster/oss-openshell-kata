@@ -1,7 +1,0 @@
-{
-  "result": "runtime restart reached ready; reporting assertion failed due test probe formatting",
-  "automatic_ip_refresh": true,
-  "docker_readiness_after_restart": true,
-  "kernel_boot_id_changed": true,
-  "limitation": "PID file lacked a trailing newline and concatenated with version output. Test formatting fixed. Parent final E2E is authoritative for complete restart assertions."
-}
