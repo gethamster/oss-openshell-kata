@@ -167,8 +167,9 @@ pub(super) fn validate(
         containers.len() == 1 && containers[0]["image"] == state.image,
         "guest image or sidecars changed"
     );
+    let shape = state.shape();
     ensure!(
-        containers[0]["resources"]["limits"] == manifest::limits(),
+        containers[0]["resources"]["limits"] == manifest::limits(&shape),
         "resource boundary differs"
     );
     ensure!(
@@ -197,7 +198,7 @@ pub(super) fn validate(
     ensure!(
         pvc["storageClassName"] == storage_class
             && pvc["accessModes"] == json!(["ReadWriteOnce"])
-            && pvc["resources"]["requests"]["storage"] == "19Gi",
+            && pvc["resources"]["requests"]["storage"] == shape.storage(),
         "private storage boundary changed"
     );
     let status = &observed.pod["status"];
@@ -274,11 +275,14 @@ pub(super) fn validate(
         network.contains(&ip) && !ip.is_unspecified() && !ip.is_loopback() && !ip.is_multicast(),
         "guest address outside operator network"
     );
-    let proof = json!({"version":1,"sandbox_id":state.sandbox_id,"workspace":state.workspace,
+    let mut proof = json!({"version":1,"sandbox_id":state.sandbox_id,"workspace":state.workspace,
         "namespace":state.namespace,"runtime_identity":identity,"runtime_class":manifest::runtime(state),
-        "image":state.image,"network":"deny-all-egress","cpu":"2","memory":"4Gi",
+        "image":state.image,"network":"deny-all-egress","cpu":shape.cpu(),"memory":shape.memory(),
         "expires_at_unix":expires,"deadline_enforcement":"kubelet-active-deadline",
         "policy_sha256":format!("{:x}",Sha256::digest(crate::canonical::to_vec(&observed.policies)?))});
+    if let Some(shape) = &state.resource_shape {
+        proof["resource_shape"] = serde_json::to_value(shape)?;
+    }
     Ok((
         State {
             host: host.to_owned(),

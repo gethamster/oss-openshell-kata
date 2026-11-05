@@ -31,6 +31,8 @@ fn config(root: &Path, profile: RuntimeProfile) -> Config {
         hosted_network_config: None,
         max_sandboxes: None,
         workspace_capacities: Vec::new(),
+        resource_shapes: Vec::new(),
+        resource_shape: Default::default(),
     }
 }
 fn route(root: &Path) -> serde_json::Value {

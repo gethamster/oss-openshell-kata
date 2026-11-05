@@ -332,6 +332,8 @@ fn operator_image_allowlist_admits_only_pinned_templates_under_one_vm_profile() 
         recovery_dir: None,
         max_sandboxes: None,
         workspace_capacities: Vec::new(),
+        resource_shapes: Vec::new(),
+        resource_shape: Default::default(),
     };
     assert_eq!(config.admitted_images(), admitted.to_vec());
     assert_eq!(

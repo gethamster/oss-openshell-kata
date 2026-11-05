@@ -1,6 +1,6 @@
 //! Explicit VM-scoped admission and live Kubernetes runtime evidence.
 
-use crate::proto::openshell::compute::v1::DriverSandbox;
+use crate::{proto::openshell::compute::v1::DriverSandbox, resource_shape::ResourceShape};
 use anyhow::{Result, bail, ensure};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -47,6 +47,9 @@ pub struct RuntimeProof {
     pub broker: Option<crate::network::HostedControlResponse>,
     #[serde(default)]
     pub fence: Option<crate::network::hosted_fence::HostedFenceProof>,
+    /// The declared shape the launcher observed; absent for the default shape.
+    #[serde(default)]
+    pub resource_shape: Option<ResourceShape>,
 }
 
 /// Derive the tenant namespace; live resource ownership is checked separately.
@@ -91,8 +94,8 @@ pub fn validate_image(image: &str) -> Result<()> {
 }
 
 /// Admit only VM-wide isolation without native guest filesystem/process claims.
-pub fn validate_request(sandbox: &DriverSandbox, image: &str) -> Result<()> {
-    validate_resources(sandbox, image)?;
+pub fn validate_request(sandbox: &DriverSandbox, image: &str, shape: &ResourceShape) -> Result<()> {
+    validate_resources(sandbox, image, shape)?;
     let native = sandbox
         .spec
         .as_ref()
@@ -106,9 +109,10 @@ pub fn validate_request(sandbox: &DriverSandbox, image: &str) -> Result<()> {
 pub fn validate_brokered_request(
     sandbox: &DriverSandbox,
     image: &str,
+    shape: &ResourceShape,
     ceiling: &crate::network::NetworkPolicy,
 ) -> Result<crate::network::NetworkPolicy> {
-    validate_resources(sandbox, image)?;
+    validate_resources(sandbox, image, shape)?;
     let native = sandbox
         .spec
         .as_ref()
@@ -117,7 +121,7 @@ pub fn validate_brokered_request(
     crate::network::compile_native(native, ceiling)
 }
 
-fn validate_resources(sandbox: &DriverSandbox, image: &str) -> Result<()> {
+fn validate_resources(sandbox: &DriverSandbox, image: &str, shape: &ResourceShape) -> Result<()> {
     namespace(&sandbox.workspace)?;
     validate_image(image)?;
     let spec = sandbox
@@ -157,15 +161,10 @@ fn validate_resources(sandbox: &DriverSandbox, image: &str) -> Result<()> {
             .is_none_or(|value| value.gpu.is_none()),
         "GPU resources unsupported"
     );
-    if let Some(resources) = &template.resources {
-        ensure!(
-            (resources.cpu_request.is_empty() || resources.cpu_request == "2")
-                && (resources.cpu_limit.is_empty() || resources.cpu_limit == "2")
-                && (resources.memory_request.is_empty() || resources.memory_request == "4Gi")
-                && (resources.memory_limit.is_empty() || resources.memory_limit == "4Gi"),
-            "resource override differs from qualified limits"
-        );
-    }
+    ensure!(
+        shape.admits(template.resources.as_ref()),
+        "resource override differs from qualified limits"
+    );
     ensure!(
         template.user_namespaces.is_none(),
         "user namespace override unsupported"
@@ -181,17 +180,19 @@ fn validate_resources(sandbox: &DriverSandbox, image: &str) -> Result<()> {
 
 impl RuntimeProof {
     /// Verify explicit hosted capability and fresh broker/fence generation evidence.
+    #[allow(clippy::too_many_arguments)] // each input binds a distinct proof field
     pub fn validate_for_profile(
         &self,
         sandbox: &DriverSandbox,
         image: &str,
+        shape: &ResourceShape,
         runtime_identity: &str,
         operator_path: Option<&std::path::Path>,
         nonce: &str,
         expected_policy: Option<&crate::network::NetworkPolicy>,
     ) -> Result<()> {
         let Some(path) = operator_path else {
-            return self.validate(sandbox, image, runtime_identity);
+            return self.validate(sandbox, image, shape, runtime_identity);
         };
         let operator = crate::kubernetes::HostedNetworkConfig::load(path)?;
         let challenge = uuid::Uuid::parse_str(nonce)?;
@@ -200,11 +201,11 @@ impl RuntimeProof {
             "invalid runtime proof challenge"
         );
         let initial_ceiling =
-            validate_brokered_request(sandbox, image, &operator.operator_ceiling)?;
+            validate_brokered_request(sandbox, image, shape, &operator.operator_ceiling)?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
-        self.validate_identity(sandbox, image, runtime_identity, now, 2)?;
+        self.validate_identity(sandbox, image, shape, runtime_identity, now, 2)?;
         ensure!(
             self.network == "brokered-public-tcp-v1" && self.proof_nonce.as_deref() == Some(nonce),
             "hosted network profile or proof challenge differs"
@@ -306,6 +307,7 @@ impl RuntimeProof {
         &self,
         sandbox: &DriverSandbox,
         image: &str,
+        shape: &ResourceShape,
         runtime_identity: &str,
         now: u64,
         version: u32,
@@ -333,8 +335,7 @@ impl RuntimeProof {
         ensure!(
             self.runtime_class == runtime_class
                 && self.image == image
-                && self.cpu == "2"
-                && self.memory == "4Gi"
+                && self.matches_shape(shape)
                 && self.policy_sha256.len() == 64
                 && self.policy_sha256.bytes().all(|b| b.is_ascii_hexdigit()),
             "runtime proof is missing qualified fences"
@@ -347,9 +348,10 @@ impl RuntimeProof {
         &self,
         sandbox: &DriverSandbox,
         image: &str,
+        shape: &ResourceShape,
         runtime_identity: &str,
     ) -> Result<()> {
-        validate_request(sandbox, image)?;
+        validate_request(sandbox, image, shape)?;
         ensure!(
             self.proof_nonce.is_none()
                 && self.source_namespace_uid.is_none()
@@ -381,12 +383,18 @@ impl RuntimeProof {
             self.runtime_class == "kata-qemu-runtime-rs"
                 && self.image == image
                 && self.network == "deny-all-egress"
-                && self.cpu == "2"
-                && self.memory == "4Gi"
+                && self.matches_shape(shape)
                 && self.policy_sha256.len() == 64
                 && self.policy_sha256.bytes().all(|b| b.is_ascii_hexdigit()),
             "runtime proof is missing qualified fences"
         );
         Ok(())
+    }
+
+    /// The observed CPU, memory and declared shape equal the admitted shape.
+    fn matches_shape(&self, shape: &ResourceShape) -> bool {
+        self.cpu == shape.cpu()
+            && self.memory == shape.memory()
+            && self.resource_shape.as_ref() == (!shape.is_default()).then_some(shape)
     }
 }

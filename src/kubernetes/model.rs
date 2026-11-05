@@ -1,6 +1,7 @@
 //! Credential-free retained Kubernetes intent and live-runtime evidence.
 
 use super::policy;
+use crate::resource_shape::ResourceShape;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{net::IpAddr, path::PathBuf};
@@ -25,11 +26,19 @@ pub(super) struct State {
     pub(super) owns_volume_for_launch: bool,
     #[serde(default)]
     pub(super) expires_at: Option<u64>,
+    /// The declared operator shape; absent means the default shape, so default
+    /// state stays byte-identical to earlier releases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) resource_shape: Option<ResourceShape>,
     pub(super) private_key_path: PathBuf,
     pub(super) known_hosts_path: PathBuf,
 }
 
 impl State {
+    /// The retained shape, or the default shape.
+    pub(super) fn shape(&self) -> ResourceShape {
+        self.resource_shape.clone().unwrap_or_default()
+    }
     pub(super) fn validate(&self, sandbox: &str, folder: &std::path::Path) -> Result<()> {
         ensure!(
             self.sandbox_id == sandbox
@@ -42,6 +51,13 @@ impl State {
             "retained sandbox identity differs"
         );
         policy::validate_image(&self.image)?;
+        if let Some(shape) = &self.resource_shape {
+            shape.validate()?;
+            ensure!(
+                !shape.is_default(),
+                "retained default shape must be implicit"
+            );
+        }
         if let Some(broker) = &self.broker {
             broker.validate()?;
             ensure!(

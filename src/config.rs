@@ -88,6 +88,15 @@ pub struct Config {
     /// Workspaces without an override retain the two-sandbox pilot limit.
     #[arg(long = "workspace-capacity")]
     pub workspace_capacities: Vec<String>,
+    /// Hosted operator resource shape, as NAME=CPU,MEMORY,STORAGE (for example
+    /// `build=4,8Gi,100Gi`). A template selects it only by requesting exactly its
+    /// CPU and memory; every other sandbox keeps the default two-vCPU, 4-GiB,
+    /// 19-GiB shape.
+    #[arg(long = "resource-shape", value_parser = crate::resource_shape::ResourceShape::parse)]
+    pub resource_shapes: Vec<crate::resource_shape::ResourceShape>,
+    /// The shape `for_sandbox` selected for one sandbox; never a command-line input.
+    #[arg(skip)]
+    pub resource_shape: crate::resource_shape::ResourceShape,
 }
 impl Config {
     /// Parse bounded operator overrides without changing unlisted workspace limits.
@@ -125,29 +134,35 @@ impl Config {
     }
 
     /// The configuration for one sandbox: its admitted template image becomes the
-    /// guest image every lifecycle and proof step for that sandbox uses.
+    /// guest image, and its template resources select the resource shape, that
+    /// every lifecycle and proof step for that sandbox uses.
     pub fn for_sandbox(
         &self,
         sandbox: &crate::proto::openshell::compute::v1::DriverSandbox,
     ) -> Self {
-        let image = sandbox
+        let template = sandbox
             .spec
             .as_ref()
-            .and_then(|spec| spec.template.as_ref())
-            .map(|template| template.image.as_str());
-        match image {
+            .and_then(|spec| spec.template.as_ref());
+        let guest_image = match template.map(|template| template.image.as_str()) {
             Some(image)
                 if self
                     .additional_guest_images
                     .iter()
                     .any(|admitted| admitted == image) =>
             {
-                Self {
-                    guest_image: Some(image.to_owned()),
-                    ..self.clone()
-                }
+                Some(image.to_owned())
             }
-            _ => self.clone(),
+            _ => self.guest_image.clone(),
+        };
+        let resource_shape = crate::resource_shape::ResourceShape::select(
+            &self.resource_shapes,
+            template.and_then(|template| template.resources.as_ref()),
+        );
+        Self {
+            guest_image,
+            resource_shape,
+            ..self.clone()
         }
     }
 
@@ -203,6 +218,10 @@ impl Config {
         }
         let native_recovery =
             self.runtime_profile == RuntimeProfile::Local && self.recovery_dir.is_some();
+        if !self.resource_shapes.is_empty() && self.runtime_profile != RuntimeProfile::Kubernetes {
+            bail!("resource shapes apply only to the hosted runtime");
+        }
+        crate::resource_shape::validate_declared(&self.resource_shapes)?;
         if !self.configured_workspace_capacities()?.is_empty()
             && self.runtime_profile != RuntimeProfile::Kubernetes
         {
@@ -289,6 +308,7 @@ impl Config {
                     crate::hosted::validate_brokered_request(
                         sandbox,
                         selected.guest_image.as_deref().unwrap_or(""),
+                        &selected.resource_shape,
                         &operator.operator_ceiling,
                     )
                     .map(|_| ())
@@ -296,6 +316,7 @@ impl Config {
                     crate::hosted::validate_request(
                         sandbox,
                         selected.guest_image.as_deref().unwrap_or(""),
+                        &selected.resource_shape,
                     )
                 }
             }

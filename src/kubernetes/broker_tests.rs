@@ -455,6 +455,7 @@ fn state_for(f: &Mock, folder: &std::path::Path) -> super::model::State {
         private_key_path: folder.join("client_key"),
         known_hosts_path: folder.join("known_hosts"),
         broker: Some(f.binding.clone()),
+        resource_shape: None,
     }
 }
 #[tokio::test]

@@ -368,6 +368,14 @@ pub async fn lifecycle_for_network(
     if let Some(workspace) = workspace {
         command.env("OPENSHELL_KATA_WORKSPACE", workspace);
     }
+    if config.resource_shape.is_default() {
+        command.env_remove("OPENSHELL_KATA_RESOURCE_SHAPE");
+    } else {
+        command.env(
+            "OPENSHELL_KATA_RESOURCE_SHAPE",
+            config.resource_shape.declaration(),
+        );
+    }
     if let Some(file) = &policy_file {
         command.arg("--policy-file").arg(file.path());
     }
@@ -462,6 +470,7 @@ pub async fn verify_runtime(
     proof.validate_for_profile(
         sandbox,
         config.guest_image.as_deref().unwrap_or(""),
+        &config.resource_shape,
         identity,
         config.hosted_network_config.as_deref(),
         &nonce,
@@ -522,6 +531,7 @@ pub async fn enforce_hosted_network(
     proof.validate_for_profile(
         sandbox,
         config.guest_image.as_deref().unwrap_or(""),
+        &config.resource_shape,
         identity,
         config.hosted_network_config.as_deref(),
         &nonce,

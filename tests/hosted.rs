@@ -1,7 +1,12 @@
 use openshell_kata::{
     hosted,
     proto::openshell::{compute::v1 as c, sandbox::v1 as s},
+    resource_shape::ResourceShape,
 };
+
+fn default_shape() -> ResourceShape {
+    ResourceShape::default()
+}
 
 fn request() -> c::DriverSandbox {
     c::DriverSandbox {
@@ -34,10 +39,10 @@ fn only_explicit_vm_policy_and_pinned_image_are_admitted() {
         .expect("valid hosted fixture")
         .image
         .clone();
-    hosted::validate_request(&input, &image).expect("valid hosted fixture");
+    hosted::validate_request(&input, &image, &default_shape()).expect("valid hosted fixture");
     let mut other = input.clone();
     other.workspace = "default".into();
-    assert!(hosted::validate_request(&other, &image).is_err());
+    assert!(hosted::validate_request(&other, &image, &default_shape()).is_err());
     other = input.clone();
     other
         .spec
@@ -50,8 +55,8 @@ fn only_explicit_vm_policy_and_pinned_image_are_admitted() {
         read_write: vec!["/sandbox".into()],
         ..Default::default()
     });
-    assert!(hosted::validate_request(&other, &image).is_err());
-    assert!(hosted::validate_request(&input, "docker:latest").is_err());
+    assert!(hosted::validate_request(&other, &image, &default_shape()).is_err());
+    assert!(hosted::validate_request(&input, "docker:latest", &default_shape()).is_err());
 }
 
 #[test]
@@ -73,9 +78,18 @@ fn proof_is_bound_to_workspace_image_and_runtime_generation() {
     let proof: hosted::RuntimeProof =
         serde_json::from_value(value.clone()).expect("valid hosted fixture");
     proof
-        .validate(&input, &image, "5da94e07-4af3-4ee9-b74e-f233091a404f")
+        .validate(
+            &input,
+            &image,
+            &default_shape(),
+            "5da94e07-4af3-4ee9-b74e-f233091a404f",
+        )
         .expect("valid hosted fixture");
-    assert!(proof.validate(&input, &image, "other-generation").is_err());
+    assert!(
+        proof
+            .validate(&input, &image, &default_shape(), "other-generation")
+            .is_err()
+    );
     for (field, changed) in [
         ("expires_at_unix", serde_json::json!(0)),
         ("deadline_enforcement", serde_json::json!("guest-timer")),
@@ -86,7 +100,12 @@ fn proof_is_bound_to_workspace_image_and_runtime_generation() {
             serde_json::from_value(wrong).expect("malformed proof fixture");
         assert!(
             wrong
-                .validate(&input, &image, "5da94e07-4af3-4ee9-b74e-f233091a404f")
+                .validate(
+                    &input,
+                    &image,
+                    &default_shape(),
+                    "5da94e07-4af3-4ee9-b74e-f233091a404f"
+                )
                 .is_err(),
             "invalid lease field {field}"
         );
@@ -96,7 +115,12 @@ fn proof_is_bound_to_workspace_image_and_runtime_generation() {
     let proof: hosted::RuntimeProof = serde_json::from_value(wrong).expect("valid hosted fixture");
     assert!(
         proof
-            .validate(&input, &image, "5da94e07-4af3-4ee9-b74e-f233091a404f")
+            .validate(
+                &input,
+                &image,
+                &default_shape(),
+                "5da94e07-4af3-4ee9-b74e-f233091a404f"
+            )
             .is_err()
     );
 }
@@ -150,7 +174,7 @@ fn hosted_network_is_explicit_and_cannot_expand_initial_authority() -> anyhow::R
         ..Default::default()
     };
     assert_eq!(
-        hosted::validate_brokered_request(&input, &image, &ceiling)?,
+        hosted::validate_brokered_request(&input, &image, &default_shape(), &ceiling)?,
         NetworkPolicy::default()
     );
     let native = input
@@ -175,16 +199,115 @@ fn hosted_network_is_explicit_and_cannot_expand_initial_authority() -> anyhow::R
         },
     );
     assert!(
-        hosted::validate_request(&input, &image).is_err(),
+        hosted::validate_request(&input, &image, &default_shape()).is_err(),
         "legacy isolated cannot gain networking"
     );
     assert_eq!(
-        hosted::validate_brokered_request(&input, &image, &ceiling)?,
+        hosted::validate_brokered_request(&input, &image, &default_shape(), &ceiling)?,
         ceiling
     );
     assert!(
-        hosted::validate_brokered_request(&input, &image, &NetworkPolicy::default()).is_err(),
+        hosted::validate_brokered_request(
+            &input,
+            &image,
+            &default_shape(),
+            &NetworkPolicy::default()
+        )
+        .is_err(),
         "empty original capability cannot widen"
     );
     Ok(())
+}
+
+fn with_resources(cpu: &str, memory: &str) -> c::DriverSandbox {
+    let mut input = request();
+    input
+        .spec
+        .as_mut()
+        .expect("spec")
+        .template
+        .as_mut()
+        .expect("template")
+        .resources = Some(c::DriverResourceRequirements {
+        cpu_request: cpu.into(),
+        cpu_limit: cpu.into(),
+        memory_request: memory.into(),
+        memory_limit: memory.into(),
+    });
+    input
+}
+
+#[test]
+fn only_a_declared_shape_admits_larger_template_resources() {
+    let build = ResourceShape::parse("build=4,8Gi,100Gi").expect("build shape");
+    let input = with_resources("4", "8Gi");
+    let image = input
+        .spec
+        .as_ref()
+        .expect("spec")
+        .template
+        .as_ref()
+        .expect("template")
+        .image
+        .clone();
+    // Unknown shape: without a declaration, the default shape refuses 4 vCPU / 8 GiB.
+    assert!(hosted::validate_request(&input, &image, &default_shape()).is_err());
+    assert_eq!(
+        ResourceShape::select(
+            &[],
+            input
+                .spec
+                .as_ref()
+                .and_then(|s| s.template.as_ref())
+                .and_then(|t| t.resources.as_ref())
+        ),
+        default_shape()
+    );
+    hosted::validate_request(&input, &image, &build).expect("declared shape");
+    // A declared shape never admits the default request or another size.
+    assert!(hosted::validate_request(&request(), &image, &build).is_err());
+    assert!(hosted::validate_request(&with_resources("6", "12Gi"), &image, &build).is_err());
+    hosted::validate_request(&with_resources("2", "4Gi"), &image, &default_shape())
+        .expect("explicit default");
+}
+
+#[test]
+fn proof_binds_the_admitted_resource_shape() {
+    let build = ResourceShape::parse("build=4,8Gi,100Gi").expect("build shape");
+    let input = with_resources("4", "8Gi");
+    let image = input
+        .spec
+        .as_ref()
+        .expect("spec")
+        .template
+        .as_ref()
+        .expect("template")
+        .image
+        .clone();
+    let identity = "5da94e07-4af3-4ee9-b74e-f233091a404f";
+    let value = serde_json::json!({"version":1,"sandbox_id":input.id,"workspace":"1h31c",
+        "namespace":"sandbox-1h31c","runtime_identity":identity,
+        "runtime_class":"kata-qemu-runtime-rs","image":image,"network":"deny-all-egress",
+        "cpu":"4","memory":"8Gi","resource_shape":build,"policy_sha256":"a".repeat(64),"expires_at_unix":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock").as_secs()+3600,"deadline_enforcement":"kubelet-active-deadline"});
+    let proof: hosted::RuntimeProof = serde_json::from_value(value.clone()).expect("proof");
+    proof
+        .validate(&input, &image, &build, identity)
+        .expect("shaped proof");
+    for (field, changed) in [
+        ("cpu", serde_json::json!("2")),
+        ("memory", serde_json::json!("4Gi")),
+        ("resource_shape", serde_json::Value::Null),
+        (
+            "resource_shape",
+            serde_json::json!(ResourceShape::parse("build=4,8Gi,19Gi").expect("small")),
+        ),
+    ] {
+        let mut wrong = value.clone();
+        wrong[field] = changed;
+        let wrong: hosted::RuntimeProof = serde_json::from_value(wrong).expect("proof");
+        assert!(
+            wrong.validate(&input, &image, &build, identity).is_err(),
+            "{field}"
+        );
+    }
 }

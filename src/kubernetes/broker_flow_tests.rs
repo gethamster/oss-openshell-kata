@@ -111,7 +111,12 @@ fn complete_v2_proof_fixture_runs_with_explicit_child_environment() {
         ("node.json", node),
         (
             "pvc.json",
-            kube::manifest::pvc(&state.name, &state.namespace, "portable-rwo"),
+            kube::manifest::pvc(
+                &state.name,
+                &state.namespace,
+                "portable-rwo",
+                &crate::resource_shape::ResourceShape::default(),
+            ),
         ),
         (
             "runtime.json",
@@ -241,7 +246,12 @@ fn brokered_guests_require_a_distinct_preboot_guarded_runtime() {
         json!({"pool":"kata-workers"})
     );
     assert_eq!(
-        kube::manifest::pod("id", "sandbox-tenant", &image())["spec"]["runtimeClassName"],
+        kube::manifest::pod(
+            "id",
+            "sandbox-tenant",
+            &image(),
+            &crate::resource_shape::ResourceShape::default()
+        )["spec"]["runtimeClassName"],
         "kata-qemu-runtime-rs"
     );
 }

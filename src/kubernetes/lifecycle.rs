@@ -20,6 +20,7 @@ pub(super) struct Launch<'a> {
     pub(super) nonce: &'a str,
     pub(super) storage_class: &'a str,
     pub(super) network: &'a ipnet::IpNet,
+    pub(super) resource_shape: Option<crate::resource_shape::ResourceShape>,
     pub(super) lifetime_secs: u64,
 }
 
@@ -49,6 +50,10 @@ pub(super) async fn create(
             "existing runtime has different retained identity"
         );
         ensure!(
+            existing.resource_shape == launch.resource_shape,
+            "retained resource shape differs; explicit cleanup required"
+        );
+        ensure!(
             existing.broker.is_some() == network_config.is_some(),
             "retained network profile differs; explicit cleanup required"
         );
@@ -72,8 +77,10 @@ pub(super) async fn create(
     let volume = client.get("pvc", Some(&name), Some(&namespace)).await?;
     if let Some(volume) = &volume {
         policy::require_owned(volume, &name)?;
+        let storage = launch.resource_shape.clone().unwrap_or_default().storage();
         ensure!(
-            volume["spec"]["storageClassName"] == launch.storage_class,
+            volume["spec"]["storageClassName"] == launch.storage_class
+                && volume["spec"]["resources"]["requests"]["storage"] == storage,
             "existing storage profile differs"
         );
     }
@@ -101,6 +108,7 @@ pub(super) async fn create(
         launch_nonce: Some(launch.nonce.into()),
         owns_volume_for_launch: volume.is_none(),
         expires_at: Some(expires),
+        resource_shape: launch.resource_shape.clone(),
         private_key_path: folder.join("client_key"),
         known_hosts_path: folder.join("known_hosts"),
     };
@@ -124,7 +132,12 @@ pub(super) async fn create(
     client.apply(&network_policy).await?;
     if volume.is_none() {
         client
-            .apply(&manifest::pvc(&name, &namespace, launch.storage_class))
+            .apply(&manifest::pvc(
+                &name,
+                &namespace,
+                launch.storage_class,
+                &state.shape(),
+            ))
             .await?;
     }
     client.apply(&json!({"apiVersion":"v1","kind":"Secret","metadata":manifest::metadata(&name,&namespace),

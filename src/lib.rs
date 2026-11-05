@@ -17,6 +17,7 @@ pub mod operator;
 pub mod policy;
 pub mod profile;
 pub mod recovery;
+pub mod resource_shape;
 pub mod runtime;
 pub mod ssh;
 pub mod supervisor;
