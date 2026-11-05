@@ -7,12 +7,18 @@ on:
       - "CLAUDE.md"
       - ".agents/**"
       - ".claude/skills/**"
+      - "**/*.md"
+      - "docs/**"
+      - "evidence/**"
   pull_request:
     paths-ignore:
       - "AGENTS.md"
       - "CLAUDE.md"
       - ".agents/**"
       - ".claude/skills/**"
+      - "**/*.md"
+      - "docs/**"
+      - "evidence/**"
 
 permissions:
   contents: read
