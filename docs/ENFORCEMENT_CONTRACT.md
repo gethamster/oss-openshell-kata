@@ -121,10 +121,14 @@ lists TCP destinations only; TLS inspection is compiled from native intent
 (below) and never authored in the operator policy.
 
 The optional `tcp_allow_public_ports` list (at most 16 nonzero ports, for
-example `[443, 80]`) admits any public DNS name or global IP literal on those
-ports. It is for build sandboxes only. The broker applies the same resolved
-address checks, never inspects the traffic, and denies the same names. Omitting
-the field keeps the exact behaviour and the existing policy encoding and digest.
+example `[443, 80]`) admits any public DNS name on those ports. It never admits
+an IP literal or a name that a resolver can read as an IPv4 address. It is for
+hosted build sandboxes only; the local profile refuses it. The broker applies
+the same resolved address checks, never inspects the traffic, and refuses
+protected name suffixes. That suffix check is name-based: address-level denial
+of a protected host needs its addresses in the denied CIDRs (see
+[HOSTED.md](HOSTED.md)). Omitting the field keeps the exact behaviour and the
+existing policy encoding and digest.
 
 ### Native network policy can only narrow the operator ceiling
 
@@ -152,10 +156,11 @@ Use an empty protocol or `tcp` and explicit `tls: skip`. Omit the L7-only
 The runtime rejects audit mode. A single
 port or a list of ports is supported; conflicting simultaneous forms are
 rejected. Every resulting host/port must exist in the operator ceiling. A host
-of `**` (or an empty host without `allowed_ips`) requests any public host on
-its ports; each port must be in the ceiling's `tcp_allow_public_ports`. The
-broker still refuses non-global, denied and protected destinations on those
-ports and never inspects them (see [HOSTED.md](HOSTED.md)).
+of `**` requests any public DNS name on its ports; each port must be in the
+ceiling's `tcp_allow_public_ports`. An empty host is rejected. The broker still
+refuses IP literals, non-global, denied and protected destinations on those
+ports and never inspects them. An inspected REST endpoint needs an exact
+ceiling entry; a public port never grants it (see [HOSTED.md](HOSTED.md)).
 
 Other endpoint features are rejected on these TCP endpoints, including L7
 rules, credentialed-provider markers, credential binding/signing/rewriting,

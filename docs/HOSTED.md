@@ -94,8 +94,8 @@ is intended for build sandboxes, such as the System snapshot builder, that fetch
 dependencies from hosts no one can list in advance. Do not grant it to thread
 or workspace sandboxes.
 
-A native rule requests a public port with host `**` (or an empty host without
-`allowed_ips`), the all-executables selector and `tls: skip`:
+A native rule requests a public port with host `**`, the all-executables
+selector and `tls: skip`. An empty host is still refused:
 
 ```yaml
 network_policies:
@@ -110,15 +110,33 @@ network_policies:
 
 Each requested port must be a public port of the operator ceiling and of the
 original caller capability; otherwise the policy is refused. Exact rules in the
-same policy are unchanged. On a public port the broker:
+same policy are unchanged. A public port never admits inspected REST: an
+inspected host needs its own exact ceiling entry. The capability is
+hosted-only; the local `docker-vm` profile refuses the field. On a public port
+the broker:
 
-- admits any well-formed DNS name or global IP literal, never a single-label
-  name or a private, loopback, link-local, metadata or transition literal;
+- admits a well-formed DNS name only. It refuses every IP literal, a
+  single-label name and a name whose last label starts with a digit, which a
+  resolver can read as an IPv4 address (for example `8.8.1028`);
+- refuses names under `protected_hostname_suffixes`;
 - refuses the request when any resolved address is not globally routable or is
   inside the baseline or inventory denied CIDRs;
-- refuses names under `protected_hostname_suffixes`;
+- applies the same checks to CONNECT tunnels and to plain-HTTP forward
+  requests;
 - relays TLS opaquely. It never inspects public-port traffic or injects
-  credentials. Credentialed hosts still need their exact inspected REST rules.
+  credentials.
+
+The protected-suffix check is name-based. It does not stop a guest-controlled
+DNS name that resolves to the public address of a protected host. Address-level
+denial comes only from the denied CIDRs. To deny a protected host by address,
+the operator must list its addresses in `baseline_denied_cidrs`, or list its
+exact name in the inventory configuration's `protected_hostnames` so that the
+inventory denies its resolved addresses. A suffix in
+`protected_hostname_suffixes` alone gives no address-level denial.
+
+Port 80 is plain HTTP. The guest, the network path and the origin can read and
+change that traffic. Grant port 80 only where a builder needs package mirrors
+that serve plain HTTP, and rely on the package manager's own signatures.
 
 The broker Pod's NetworkPolicy adds the public ports to its allowed egress ports
 with the same private-range, baseline and inventory exclusions.
