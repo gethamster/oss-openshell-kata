@@ -46,6 +46,15 @@ footers that do not help the user act. Do not replace removed filler with a
 badge, tooltip, or helper sentence that says the same thing. Avoid invented
 navigation and actions outside the requested workflow.
 
+Review titles, subtitles, labels, helper text, and actions together for repeated
+meaning. Do not populate every text slot by default. Let the heading establish
+the context, shorten labels within that context, and use a concise action verb.
+A **New organization** dialog can use **Name** and **Create**; it does not need a
+routine ownership subtitle or the word “organization” repeated at every step.
+Supporting text should explain a consequential choice, non-obvious requirement,
+or likely mistake. Preserve accessible field names and repeat targets where
+needed for disambiguation or destructive confirmation.
+
 Headers and feedback should fit the operation. Do not impose a subtitle on every
 screen or route every error to a toast. Use
 [Feedback and accessibility](references/feedback-and-accessibility.md) for

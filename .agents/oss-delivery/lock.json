@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/gethamster/oss-delivery",
-  "revision": "54bcd7ed7b59c7ffd1a4cf57f179c92c0e95eaf2",
+  "revision": "4dd3e7aa912771f14ddb36352b579aaf58b95c93",
   "files": {
     ".agents/oss-delivery/AGENTS.md": {
       "sha256": "0de0ad3f7ed5dd64ba882f0d86fe9db3d3c9853b7283da76c56c9d143f24a089",
@@ -39,7 +39,7 @@
       "mode": 420
     },
     ".agents/skills/interface-design/SKILL.md": {
-      "sha256": "4242620c6e9c4db7c33186ea81b89ca69aeefc93cd5f24b2c1301641ba623ba6",
+      "sha256": "2d5e3f9395efec7451188c77d968f96de79ba8ac9cb7df11b6ff72d87c2b5b6a",
       "mode": 420
     },
     ".agents/skills/interface-design/agents/openai.yaml": {
