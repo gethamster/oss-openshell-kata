@@ -6,7 +6,10 @@ import hashlib
 import json
 from pathlib import Path
 import tarfile
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 
 def package(target, platform, output):
@@ -25,8 +28,11 @@ def package(target, platform, output):
             info.size, info.mode, info.mtime = source.stat().st_size, mode, 0
             with source.open('rb') as content:
                 bundle.addfile(info, content)
+    checksum = hashlib.sha256()
     with archive.open('rb') as source:
-        digest = hashlib.file_digest(source, 'sha256').hexdigest()
+        for block in iter(lambda: source.read(1024 * 1024), b''):
+            checksum.update(block)
+    digest = checksum.hexdigest()
     (output / (archive.name + '.sha256')).write_text(digest + '  ' + archive.name + '\n')
     (output / 'component.json').write_text(json.dumps({'schema_version': 1, 'component': 'openshell-kata', 'version': metadata['version'], 'platform': platform, 'archive': archive.name, 'sha256': digest, 'bytes': archive.stat().st_size}, sort_keys=True) + '\n')
 
