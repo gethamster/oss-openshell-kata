@@ -26,13 +26,20 @@ fn state() -> model::State {
         owns_volume_for_launch: false,
         expires_at: Some(lease::now().expect("now") + 3600),
         resource_shape: None,
+        docker_disk: true,
     }
 }
 fn build_shape() -> crate::resource_shape::ResourceShape {
     crate::resource_shape::ResourceShape::parse("build=4,8Gi,100Gi").expect("build shape")
 }
 fn observations(state: &model::State) -> proof::Observations {
-    let mut pod = manifest::pod(&state.name, &state.namespace, &state.image, &state.shape());
+    let mut pod = manifest::pod(
+        &state.name,
+        &state.namespace,
+        &state.image,
+        &state.shape(),
+        state.docker_disk,
+    );
     pod["metadata"]["uid"] = json!(state.runtime_identity);
     pod["metadata"]["resourceVersion"] = json!("1");
     pod["metadata"]["annotations"] = lease::annotations(
@@ -51,6 +58,14 @@ fn observations(state: &model::State) -> proof::Observations {
             "standard-rwo",
             &state.shape(),
         ),
+        docker_pvc: state.docker_disk.then(|| {
+            manifest::docker_pvc(
+                &state.name,
+                &state.namespace,
+                "standard-rwo",
+                &state.shape(),
+            )
+        }),
         node: json!({"metadata":{"labels":{"pool":"kata-workers","katacontainers.io/kata-runtime":"true"}}}),
         runtime: json!({"handler":manifest::RUNTIME,"metadata":{"annotations":{"katacontainers.io/kata-version":"4.3.1"}}}),
         policies: vec![manifest::network_policy(
@@ -202,7 +217,7 @@ fn ingress_only_policy_is_not_egress_isolation() {
 #[test]
 fn pod_has_private_storage_no_token_fixed_vm_and_no_python_probe() {
     let default = crate::resource_shape::ResourceShape::default();
-    let pod = manifest::pod("id", "sandbox-1h31c", &image(), &default);
+    let pod = manifest::pod("id", "sandbox-1h31c", &image(), &default, false);
     assert_eq!(pod["spec"]["automountServiceAccountToken"], false);
     assert_eq!(pod["spec"]["runtimeClassName"], manifest::RUNTIME);
     assert_eq!(
@@ -226,7 +241,7 @@ fn pod_has_private_storage_no_token_fixed_vm_and_no_python_probe() {
 fn default_shape_manifests_are_unchanged() {
     let default = crate::resource_shape::ResourceShape::default();
     let resources = json!({"cpu":"2","memory":"4Gi","ephemeral-storage":"1Gi"});
-    let pod = manifest::pod("id", "sandbox-1h31c", &image(), &default);
+    let pod = manifest::pod("id", "sandbox-1h31c", &image(), &default, false);
     for container in ["containers", "initContainers"] {
         assert_eq!(
             pod["spec"][container][0]["resources"],
@@ -1006,4 +1021,69 @@ fn control_namespace_rejects_non_dns_labels() {
     ] {
         policy::validate_control_namespace(valid).expect("valid namespace");
     }
+}
+
+#[test]
+fn docker_disk_is_a_raw_block_volume_and_legacy_guests_keep_vfs() {
+    let state = state();
+    let observed = observations(&state);
+    let guest = &observed.pod["spec"]["containers"][0];
+    assert_eq!(
+        guest["volumeDevices"],
+        json!([{"name":"docker","devicePath":manifest::DOCKER_DEVICE}])
+    );
+    assert!(
+        !guest["volumeMounts"]
+            .to_string()
+            .contains("/var/lib/docker")
+    );
+    assert_eq!(guest["env"][1]["value"], "overlay2");
+    let docker = observed.docker_pvc.as_ref().expect("docker pvc");
+    assert_eq!(docker["metadata"]["name"], format!("{}-docker", state.name));
+    assert_eq!(docker["spec"]["volumeMode"], "Block");
+    let validate = |state: &model::State, observed: &proof::Observations| {
+        proof::validate(
+            state,
+            "standard-rwo",
+            observed,
+            &network(),
+            policy::DEFAULT_CONTROL_NAMESPACE,
+        )
+    };
+    validate(&state, &observed).expect("docker disk proof");
+    // A filesystem-mode, resized, or missing Docker disk is refused.
+    for change in ["filesystem", "size", "missing"] {
+        let mut changed = observations(&state);
+        match change {
+            "filesystem" => {
+                changed.docker_pvc.as_mut().expect("pvc")["spec"]["volumeMode"] =
+                    json!("Filesystem")
+            }
+            "size" => {
+                changed.docker_pvc.as_mut().expect("pvc")["spec"]["resources"]["requests"]["storage"] =
+                    json!("100Gi")
+            }
+            _ => changed.docker_pvc = None,
+        }
+        assert!(validate(&state, &changed).is_err(), "{change}");
+    }
+    // A guest launched before the disk keeps VFS and still proves; the two
+    // layouts cannot stand in for each other.
+    let legacy = model::State {
+        docker_disk: false,
+        ..state.clone()
+    };
+    let legacy_observed = observations(&legacy);
+    assert_eq!(
+        legacy_observed.pod["spec"]["containers"][0]["env"][1]["value"],
+        "vfs"
+    );
+    validate(&legacy, &legacy_observed).expect("legacy proof");
+    assert!(validate(&legacy, &observed).is_err());
+    assert!(validate(&state, &legacy_observed).is_err());
+    assert!(
+        !serde_json::to_string(&legacy)
+            .expect("state")
+            .contains("docker_disk")
+    );
 }

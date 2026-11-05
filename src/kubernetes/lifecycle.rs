@@ -77,12 +77,19 @@ pub(super) async fn create(
     let volume = client.get("pvc", Some(&name), Some(&namespace)).await?;
     if let Some(volume) = &volume {
         policy::require_owned(volume, &name)?;
-        let storage = launch.resource_shape.clone().unwrap_or_default().storage();
+        let storage = launch_shape(launch).storage();
         ensure!(
             volume["spec"]["storageClassName"] == launch.storage_class
                 && volume["spec"]["resources"]["requests"]["storage"] == storage,
             "existing storage profile differs"
         );
+    }
+    let docker_name = manifest::docker_pvc_name(&name);
+    let docker_volume = client
+        .get("pvc", Some(&docker_name), Some(&namespace))
+        .await?;
+    if let Some(volume) = &docker_volume {
+        check_docker_volume(volume, &name, launch.storage_class, &launch_shape(launch))?;
     }
     for kind in ["networkpolicy", "secret"] {
         if let Some(resource) = client.get(kind, Some(&name), Some(&namespace)).await? {
@@ -109,6 +116,7 @@ pub(super) async fn create(
         owns_volume_for_launch: volume.is_none(),
         expires_at: Some(expires),
         resource_shape: launch.resource_shape.clone(),
+        docker_disk: true,
         private_key_path: folder.join("client_key"),
         known_hosts_path: folder.join("known_hosts"),
     };
@@ -133,6 +141,16 @@ pub(super) async fn create(
     if volume.is_none() {
         client
             .apply(&manifest::pvc(
+                &name,
+                &namespace,
+                launch.storage_class,
+                &state.shape(),
+            ))
+            .await?;
+    }
+    if docker_volume.is_none() {
+        client
+            .apply(&manifest::docker_pvc(
                 &name,
                 &namespace,
                 launch.storage_class,
@@ -184,6 +202,30 @@ pub(super) async fn create(
     store.known_hosts(launch.sandbox, &ready.host, &host_key)?;
     store.save(&ready)?;
     Ok(serde_json::to_value(Route::from(&ready))?)
+}
+
+fn launch_shape(launch: &Launch<'_>) -> crate::resource_shape::ResourceShape {
+    launch.resource_shape.clone().unwrap_or_default()
+}
+
+/// A retained Docker disk must be this sandbox's raw disk of the admitted size.
+pub(super) fn check_docker_volume(
+    volume: &Value,
+    name: &str,
+    storage_class: &str,
+    shape: &crate::resource_shape::ResourceShape,
+) -> Result<()> {
+    policy::require_owned(volume, name)?;
+    let spec = &volume["spec"];
+    ensure!(
+        volume["metadata"]["name"] == manifest::docker_pvc_name(name)
+            && spec["storageClassName"] == storage_class
+            && spec["accessModes"] == json!(["ReadWriteOnce"])
+            && spec["volumeMode"] == "Block"
+            && spec["resources"]["requests"]["storage"] == shape.storage(),
+        "Docker disk boundary differs"
+    );
+    Ok(())
 }
 
 async fn generate_keys(store: &Store, sandbox: &str, folder: &Path) -> Result<()> {
@@ -272,6 +314,7 @@ pub(super) async fn stop(
         for kind in ["secret", "pvc", "networkpolicy"] {
             client.delete(kind, &state.name, &state.namespace).await?;
         }
+        delete_docker_volume(client, state).await?;
         store.erase(&state.sandbox_id)?;
     }
     Ok(())
@@ -305,7 +348,21 @@ pub(super) async fn abort(
             policy::require_owned(&resource, &state.name)?;
             client.delete("pvc", &state.name, &state.namespace).await?;
         }
+        delete_docker_volume(client, state).await?;
         store.erase(&state.sandbox_id)?;
+    }
+    Ok(())
+}
+
+/// The Docker disk is a cache: it goes with the sandbox, never with a relaunch.
+async fn delete_docker_volume(client: &Client, state: &State) -> Result<()> {
+    let docker_name = manifest::docker_pvc_name(&state.name);
+    if let Some(resource) = client
+        .get("pvc", Some(&docker_name), Some(&state.namespace))
+        .await?
+    {
+        policy::require_owned(&resource, &state.name)?;
+        client.delete("pvc", &docker_name, &state.namespace).await?;
     }
     Ok(())
 }

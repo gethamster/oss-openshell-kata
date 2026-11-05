@@ -39,7 +39,7 @@ USER root
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      openssh-server docker.io curl git ca-certificates iproute2 musl python3; \
+      openssh-server docker.io e2fsprogs curl git ca-certificates iproute2 musl python3; \
     rm -rf /var/lib/apt/lists/*; \
     existing=$(getent passwd 1000 | cut -d: -f1 || true); \
     if [ -n "$existing" ] && [ "$existing" != sandbox ]; then \

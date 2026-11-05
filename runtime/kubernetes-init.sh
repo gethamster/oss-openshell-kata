@@ -21,6 +21,18 @@ fi
 chown sandbox:sandbox /sandbox
 rm -f /var/run/docker.pid /var/run/docker.sock \
   /var/run/docker/containerd/containerd.pid /var/run/docker/containerd/containerd.sock
-# The PVC transport requires VFS; local block-backed guests use overlay2.
-dockerd --host=unix:///var/run/docker.sock --group=sandbox --storage-driver=vfs > /var/log/docker.log 2>&1 &
+# A raw Docker disk reaches this VM as a virtio block device, so Docker can use
+# overlay2. Format it only when it does not mount (first boot). Guests
+# launched before the disk keep Docker data on the shared PVC, which needs VFS.
+driver=vfs
+if [ -b /dev/openshell-docker ]; then
+  mkdir -p /var/lib/docker
+  # ponytail: an unmountable disk is reformatted; it only holds the Docker cache.
+  if ! mount -t ext4 /dev/openshell-docker /var/lib/docker 2>/dev/null; then
+    mkfs.ext4 -q -F -L openshell-docker /dev/openshell-docker
+    mount -t ext4 /dev/openshell-docker /var/lib/docker
+  fi
+  driver=overlay2
+fi
+dockerd --host=unix:///var/run/docker.sock --group=sandbox --storage-driver="$driver" > /var/log/docker.log 2>&1 &
 exec /usr/sbin/sshd -D -e -f /etc/ssh/openshell-kata.conf

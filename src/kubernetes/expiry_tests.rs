@@ -32,6 +32,7 @@ impl Fixture {
             owns_volume_for_launch: true,
             expires_at: Some(1100),
             resource_shape: None,
+            docker_disk: false,
             private_key_path: root.join("key"),
             known_hosts_path: root.join("known"),
         };

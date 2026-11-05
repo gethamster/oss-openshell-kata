@@ -250,7 +250,8 @@ fn brokered_guests_require_a_distinct_preboot_guarded_runtime() {
             "id",
             "sandbox-tenant",
             &image(),
-            &crate::resource_shape::ResourceShape::default()
+            &crate::resource_shape::ResourceShape::default(),
+            true
         )["spec"]["runtimeClassName"],
         "kata-qemu-runtime-rs"
     );
