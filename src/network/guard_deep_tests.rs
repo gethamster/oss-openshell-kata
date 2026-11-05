@@ -644,7 +644,12 @@ async fn public_port_http_forwarding_keeps_every_destination_check() -> Result<(
         if allowed {
             assert!(head.starts_with("GET /simple/ "), "{authority}: {head}");
         } else {
-            assert!(head.starts_with("HTTP/1.1 403"), "{authority}: {head}");
+            // Policy refuses with 403; the protected-name and address guards
+            // refuse at resolution with 502. Neither reaches the upstream.
+            assert!(
+                head.starts_with("HTTP/1.1 403") || head.starts_with("HTTP/1.1 502"),
+                "{authority}: {head}"
+            );
         }
         assert_eq!(connects.load(Ordering::SeqCst), usize::from(allowed));
         broker.shutdown().await?;
