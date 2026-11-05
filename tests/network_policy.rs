@@ -80,3 +80,95 @@ fn non_global_and_transition_addresses_cannot_reach_metadata_or_siblings() {
         );
     }
 }
+
+fn public(ports: Vec<u16>) -> NetworkPolicy {
+    NetworkPolicy {
+        tcp_allow_public_ports: ports,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn public_ports_are_optional_and_old_policies_are_unchanged() {
+    let old = r#"{"tcp_allow":[{"host":"example.com","port":443}]}"#;
+    let parsed: NetworkPolicy = serde_json::from_str(old).expect("old policy parses");
+    assert!(parsed.tcp_allow_public_ports.is_empty());
+    let text = serde_json::to_string(&parsed.normalized().expect("valid")).expect("json");
+    assert_eq!(text, old);
+    let new: NetworkPolicy =
+        serde_json::from_str(r#"{"tcp_allow":[],"tcp_allow_public_ports":[443,80,443]}"#)
+            .expect("new policy parses");
+    assert_eq!(
+        new.normalized().expect("valid").tcp_allow_public_ports,
+        vec![80, 443]
+    );
+    assert!(!new.is_deny_all());
+    assert!(NetworkPolicy::default().is_deny_all());
+    assert!(public(vec![0]).validate().is_err());
+    assert!(public((1..=17).collect()).validate().is_err());
+}
+
+#[test]
+fn public_port_admits_public_names_only_on_that_port() {
+    let policy = public(vec![443]).validate().expect("valid");
+    for host in [
+        "example.com",
+        "Registry.NPMJS.org.",
+        "xn--bcher-kva.example",
+    ] {
+        assert!(policy.allows(host, 443), "refused {host}");
+        // A public port is never an exact grant.
+        assert!(!policy.allows_exact(host, 443), "exact {host}");
+    }
+    assert!(!policy.allows("example.com", 80));
+    for host in [
+        // Global IP literals bypass name-based protected suffixes.
+        "1.1.1.1",
+        "2606:4700::1111",
+        "1.1.1.1.",
+        // inet_aton forms that a system resolver reads as IPv4 addresses.
+        "8.8.1028",
+        "0x8.0x8.0x8.0x8",
+        "010.8.8.8",
+        "example.123",
+        "localhost",
+        "10.0.0.5",
+        "169.254.169.254",
+        "127.0.0.1",
+        "::1",
+        "*.example.com",
+        "user@example.com",
+        "",
+    ] {
+        assert!(!policy.allows(host, 443), "accepted {host}");
+    }
+}
+
+#[test]
+fn public_ports_are_contained_by_the_ceiling() {
+    let exact = NetworkPolicy {
+        tcp_allow: vec![Endpoint {
+            host: "example.com".into(),
+            port: 443,
+        }],
+        ..Default::default()
+    };
+    assert!(
+        public(vec![443])
+            .is_subset_of(&public(vec![443, 80]))
+            .expect("valid")
+    );
+    assert!(!public(vec![443]).is_subset_of(&exact).expect("valid"));
+    assert!(
+        !public(vec![80])
+            .is_subset_of(&public(vec![443]))
+            .expect("valid")
+    );
+    // A public ceiling port covers exact destinations on that port.
+    assert!(exact.is_subset_of(&public(vec![443])).expect("valid"));
+    assert!(
+        !public(vec![443])
+            .is_subset_of(&NetworkPolicy::default())
+            .expect("valid")
+    );
+}

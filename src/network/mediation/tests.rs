@@ -157,6 +157,7 @@ async fn fixture(guest: IpAddr, access: RestAccess) -> Result<Fixture> {
                 access,
             })
             .collect(),
+        ..Default::default()
     };
     let broker = bind_with_connector(
         "127.0.0.1:0".parse()?,

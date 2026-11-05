@@ -50,6 +50,7 @@ fn compile(
     let ceiling = ceiling.validate()?;
     let mut allowed = BTreeSet::new();
     let mut inspected: BTreeMap<Endpoint, RestAccess> = BTreeMap::new();
+    let mut public_ports = BTreeSet::new();
     for (name, rule) in &native.network_policies {
         if inspection && name.starts_with(PROVIDER_RULE_PREFIX) {
             continue;
@@ -78,6 +79,19 @@ fn compile(
             };
             for port in ports {
                 let port = u16::try_from(port).context("invalid TCP port")?;
+                if is_public_host(&endpoint.host) {
+                    if access.is_some() {
+                        bail!("public-host endpoints cannot be inspected; use tls skip");
+                    }
+                    if port == 0 {
+                        bail!("TCP destination port must be nonzero");
+                    }
+                    if !ceiling.allows_public_port(port) {
+                        bail!("native public port exceeds operator network ceiling");
+                    }
+                    public_ports.insert(port);
+                    continue;
+                }
                 let requested = NetworkPolicy {
                     tcp_allow: vec![Endpoint {
                         host: endpoint.host.clone(),
@@ -86,7 +100,14 @@ fn compile(
                     ..Default::default()
                 };
                 requested.validate()?;
-                if !ceiling.allows(&endpoint.host, port) {
+                // Inspection and credentials need an exact ceiling entry;
+                // a public port only ever grants opaque TCP.
+                let within = if access.is_some() {
+                    ceiling.allows_exact(&endpoint.host, port)
+                } else {
+                    ceiling.allows(&endpoint.host, port)
+                };
+                if !within {
                     bail!("native destination exceeds operator network ceiling");
                 }
                 // Policy validation canonicalizes DNS case and terminal dot.
@@ -121,9 +142,16 @@ fn compile(
                 access,
             })
             .collect(),
+        tcp_allow_public_ports: public_ports.into_iter().collect(),
     };
     policy.validate()?;
     Ok(policy)
+}
+
+/// `**` (every name) selects any public DNS name on the endpoint's ports.
+/// An empty host stays invalid, as in OpenShell without `allowed_ips`.
+fn is_public_host(host: &str) -> bool {
+    host == "**"
 }
 
 /// The supported credential-bearing shape: L7 REST with TLS terminated by the

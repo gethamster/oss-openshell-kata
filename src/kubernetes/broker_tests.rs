@@ -879,3 +879,28 @@ fn brokered_guest_control_ingress_uses_the_operator_namespace() {
         .expect("configured controller allowed");
     assert!(broker_policy::validate_guest(&[p], &labels, &binding, "other-control").is_err());
 }
+
+#[test]
+fn public_ports_get_the_same_private_range_exclusions() {
+    let mut cfg = config();
+    cfg.operator_ceiling.tcp_allow_public_ports = vec![80, 443];
+    let mut i = inventory();
+    i.denied_cidrs.push("8.8.8.8/32".into());
+    let p = broker_manifest::network_policy(&binding(), &cfg, &i).expect("policy");
+    let rule = &p["spec"]["egress"][1];
+    assert_eq!(
+        rule["ports"],
+        json!([{"protocol":"TCP","port":80},{"protocol":"TCP","port":443}])
+    );
+    let except = rule["to"][0]["ipBlock"]["except"]
+        .as_array()
+        .expect("except");
+    for cidr in [
+        "8.8.8.8/32",
+        "10.0.0.0/8",
+        "169.254.0.0/16",
+        "100.64.0.0/10",
+    ] {
+        assert!(except.contains(&json!(cidr)), "missing {cidr}");
+    }
+}

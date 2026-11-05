@@ -545,3 +545,114 @@ async fn poisoned_guard_revokes_authority_without_panicking_control() -> Result<
     assert_eq!(inspect(&broker).await?.authorization_expires_at_unix, 0);
     broker.shutdown().await
 }
+
+async fn first_line(broker: &HostedBrokerHandle, head: &str) -> Result<String> {
+    let mut socket = TcpStream::connect(broker.local_addr()).await?;
+    socket.write_all(head.as_bytes()).await?;
+    let mut reader = BufReader::new(socket);
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await??;
+    Ok(line)
+}
+
+async fn connect_status(broker: &HostedBrokerHandle, target: &str) -> Result<String> {
+    first_line(broker, &format!("CONNECT {target} HTTP/1.1\r\n\r\n")).await
+}
+
+/// A plain-HTTP forward request; the fake upstream echoes the forwarded head.
+async fn forward_status(broker: &HostedBrokerHandle, authority: &str) -> Result<String> {
+    first_line(
+        broker,
+        &format!("GET http://{authority}/simple/ HTTP/1.1\r\nHost: {authority}\r\n\r\n"),
+    )
+    .await
+}
+
+fn public_fixture_config(ports: Vec<u16>) -> (NetworkPolicy, HostedBrokerConfig) {
+    let public = NetworkPolicy {
+        tcp_allow_public_ports: ports,
+        ..policy()
+    };
+    let config = HostedBrokerConfig {
+        operator_ceiling: public.clone(),
+        initial_ceiling: public.clone(),
+        ..config()
+    };
+    (public, config)
+}
+
+#[tokio::test]
+async fn public_ports_keep_protected_names_and_denied_addresses_refused() -> Result<()> {
+    let (public, config) = public_fixture_config(vec![443]);
+    let mut denied = inventory(1);
+    denied.denied_cidrs.push("8.8.8.8/32".into());
+    for (answer, target, allowed) in [
+        ("8.8.4.4:443", "any.example.org:443", true),
+        ("8.8.4.4:443", "any.example.org:80", false),
+        ("8.8.4.4:443", "service.internal.example.com:443", false),
+        ("8.8.4.4:443", "10.0.0.5:443", false),
+        // IP literals are refused even when global and not denied: the
+        // protected-suffix check must always see a name.
+        ("8.8.4.4:443", "8.8.4.4:443", false),
+        ("8.8.4.4:443", "[2001:4860:4860::8888]:443", false),
+        // Names that inet_aton reads as an IPv4 address are refused too.
+        ("8.8.4.4:443", "8.8.1028:443", false),
+        ("8.8.4.4:443", "0x8.0x8.0x4.0x4:443", false),
+        ("169.254.169.254:443", "metadata.example.org:443", false),
+        ("10.1.2.3:443", "rebound.example.org:443", false),
+        ("8.8.8.8:443", "denied.example.org:443", false),
+    ] {
+        let (broker, connects) =
+            fixture(config.clone(), denied.clone(), vec![answer.parse()?]).await?;
+        broker
+            .request(request(&broker, 1, public.clone(), denied.clone()))
+            .await?;
+        let head = connect_status(&broker, target).await?;
+        assert_eq!(
+            head.contains("200"),
+            allowed,
+            "{target} via {answer}: {head}"
+        );
+        assert_eq!(connects.load(Ordering::SeqCst), usize::from(allowed));
+        broker.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn public_port_http_forwarding_keeps_every_destination_check() -> Result<()> {
+    let (public, config) = public_fixture_config(vec![80]);
+    let mut denied = inventory(1);
+    denied.denied_cidrs.push("8.8.8.8/32".into());
+    for (answer, authority, allowed) in [
+        ("8.8.4.4:80", "mirror.example.org", true),
+        ("8.8.4.4:80", "mirror.example.org:8080", false),
+        ("8.8.4.4:80", "10.0.0.5", false),
+        ("8.8.4.4:80", "8.8.4.4", false),
+        ("8.8.4.4:80", "[2001:4860:4860::8888]", false),
+        ("8.8.4.4:80", "admin.internal.example.com", false),
+        ("169.254.169.254:80", "metadata.example.org", false),
+        ("10.1.2.3:80", "rebound.example.org", false),
+        ("8.8.8.8:80", "denied.example.org", false),
+    ] {
+        let (broker, connects) =
+            fixture(config.clone(), denied.clone(), vec![answer.parse()?]).await?;
+        broker
+            .request(request(&broker, 1, public.clone(), denied.clone()))
+            .await?;
+        let head = forward_status(&broker, authority).await?;
+        if allowed {
+            assert!(head.starts_with("GET /simple/ "), "{authority}: {head}");
+        } else {
+            // Policy refuses with 403; the protected-name and address guards
+            // refuse at resolution with 502. Neither reaches the upstream.
+            assert!(
+                head.starts_with("HTTP/1.1 403") || head.starts_with("HTTP/1.1 502"),
+                "{authority}: {head}"
+            );
+        }
+        assert_eq!(connects.load(Ordering::SeqCst), usize::from(allowed));
+        broker.shutdown().await?;
+    }
+    Ok(())
+}

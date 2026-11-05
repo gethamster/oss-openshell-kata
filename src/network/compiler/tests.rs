@@ -286,6 +286,7 @@ fn inspected_destinations_must_be_allowed_dns_names() {
             port: 443,
             access: RestAccess::Full,
         }],
+        ..Default::default()
     };
     assert!(policy.validate().is_err());
     let unchanged = serde_json::to_string(&NetworkPolicy::default()).expect("serialize");
@@ -306,4 +307,191 @@ fn access_presets_match_openshell_rest_expansion() {
     }
     assert!(!RestAccess::ReadWrite.allows("DELETE"));
     assert!(RestAccess::Full.allows("DELETE"));
+}
+
+fn public_ceiling(ports: Vec<u16>) -> NetworkPolicy {
+    NetworkPolicy {
+        tcp_allow_public_ports: ports,
+        ..ceiling()
+    }
+}
+
+fn skip_on(host: &str, ports: Vec<u32>) -> NetworkEndpoint {
+    NetworkEndpoint {
+        ports,
+        port: 0,
+        ..skip(host)
+    }
+}
+
+#[test]
+fn public_host_rules_compile_only_within_ceiling_public_ports() -> Result<()> {
+    let native = policy(vec![(
+        "build",
+        rule(
+            "/**",
+            vec![skip_on("**", vec![443, 80]), skip("github.com")],
+        ),
+    )]);
+    let compiled = compile_native(&native, &public_ceiling(vec![80, 443]))?;
+    assert_eq!(compiled.tcp_allow_public_ports, vec![80, 443]);
+    assert_eq!(
+        compiled.tcp_allow,
+        vec![Endpoint {
+            host: "github.com".into(),
+            port: 443
+        }]
+    );
+    assert!(compiled.is_subset_of(&public_ceiling(vec![80, 443]))?);
+    // The ceiling grants 443 only: port 80 must be refused, not dropped.
+    let error = compile_native(&native, &public_ceiling(vec![443]))
+        .expect_err("public port outside ceiling");
+    assert!(error.to_string().contains("public port"));
+    // No public ports in the ceiling: the exact-only behaviour is unchanged.
+    assert!(compile_native(&native, &ceiling()).is_err());
+    // Only `**` selects public hosts; an empty host stays invalid, as in
+    // OpenShell without allowed_ips.
+    let empty = policy(vec![("build", rule("/**", vec![skip("")]))]);
+    assert!(compile_native(&empty, &public_ceiling(vec![443])).is_err());
+    assert!(compile_native_with_inspection(&empty, &public_ceiling(vec![443])).is_err());
+    Ok(())
+}
+
+#[test]
+fn public_host_rules_keep_every_other_restriction() {
+    let ceiling = public_ceiling(vec![443]);
+    let with_ips = NetworkEndpoint {
+        allowed_ips: vec!["10.0.0.0/8".into()],
+        ..skip("")
+    };
+    for native in [
+        // allowed_ips replaces the private-range check in OpenShell; never here.
+        policy(vec![("ips", rule("/**", vec![with_ips]))]),
+        // Public traffic is TLS passthrough only: no inspection or credentials.
+        policy(vec![("rest", rule("/**", vec![rest("**", 2)]))]),
+        // Executable identity is still unsupported.
+        policy(vec![("git", rule("/usr/bin/git", vec![skip("**")]))]),
+        // Only `**` is "every name"; other globs stay rejected.
+        policy(vec![("glob", rule("/**", vec![skip("*.example.com")]))]),
+        policy(vec![("star", rule("/**", vec![skip("*")]))]),
+    ] {
+        assert!(compile_native_with_inspection(&native, &ceiling).is_err());
+        assert!(compile_native(&native, &ceiling).is_err());
+    }
+}
+
+#[test]
+fn public_ports_never_grant_inspection_or_credentials() -> Result<()> {
+    let ceiling = public_ceiling(vec![443]);
+    // A host absent from the exact ceiling cannot become inspected REST on a
+    // public port; it may only be opaque TCP.
+    let unlisted = policy(vec![(
+        "rest",
+        rule("/**", vec![rest("evil.example.org", 3)]),
+    )]);
+    let error = compile_native_with_inspection(&unlisted, &ceiling)
+        .expect_err("inspected host outside the exact ceiling");
+    assert!(error.to_string().contains("ceiling"));
+    // Exact ceiling hosts stay inspectable beside a public port on the same
+    // port, and opaque hosts on that port need no exact entry.
+    let mixed = policy(vec![(
+        "build",
+        rule(
+            "/**",
+            vec![
+                rest("api.github.com", 2),
+                skip("**"),
+                skip("registry.npmjs.org"),
+            ],
+        ),
+    )]);
+    let compiled = compile_native_with_inspection(&mixed, &ceiling)?;
+    assert_eq!(compiled.tcp_allow_public_ports, vec![443]);
+    assert_eq!(
+        compiled.tls_inspect,
+        vec![InspectedEndpoint {
+            host: "api.github.com".into(),
+            port: 443,
+            access: RestAccess::ReadWrite,
+        }]
+    );
+    assert!(compiled.is_subset_of(&ceiling)?);
+    // A forged policy that inspects an unlisted host is not a subset.
+    let forged = NetworkPolicy {
+        tcp_allow: vec![Endpoint {
+            host: "evil.example.org".into(),
+            port: 443,
+        }],
+        tls_inspect: vec![InspectedEndpoint {
+            host: "evil.example.org".into(),
+            port: 443,
+            access: RestAccess::Full,
+        }],
+        ..Default::default()
+    };
+    assert!(!forged.is_subset_of(&ceiling)?);
+    // The opaque form of the same host is a subset through the public port.
+    let opaque = NetworkPolicy {
+        tls_inspect: Vec::new(),
+        ..forged
+    };
+    assert!(opaque.is_subset_of(&ceiling)?);
+    Ok(())
+}
+
+#[test]
+fn public_host_port_forms_are_unambiguous() -> Result<()> {
+    let ceiling = public_ceiling(vec![80, 443]);
+    let compile = |endpoint: NetworkEndpoint| {
+        compile_native(
+            &policy(vec![("build", rule("/**", vec![endpoint]))]),
+            &ceiling,
+        )
+    };
+    let with = |port: u32, ports: Vec<u32>| NetworkEndpoint {
+        port,
+        ports,
+        ..skip("**")
+    };
+    // Port 0 alone, inside a list, or as the only list entry is refused.
+    assert!(compile(with(0, vec![])).is_err());
+    assert!(compile(with(0, vec![443, 0])).is_err());
+    assert!(compile(with(0, vec![0])).is_err());
+    // A single port and a list must agree.
+    assert!(compile(with(443, vec![80])).is_err());
+    assert!(compile(with(443, vec![443, 80])).is_err());
+    assert_eq!(
+        compile(with(443, vec![443]))?.tcp_allow_public_ports,
+        vec![443]
+    );
+    // Duplicate list entries collapse to one port.
+    assert_eq!(
+        compile(with(0, vec![443, 443, 80]))?.tcp_allow_public_ports,
+        vec![80, 443]
+    );
+    // Public and exact entries for the same ports stay separate.
+    let mixed = compile_native(
+        &policy(vec![(
+            "build",
+            rule(
+                "/**",
+                vec![
+                    with(0, vec![443, 80]),
+                    skip_on("github.com", vec![443, 443]),
+                ],
+            ),
+        )]),
+        &ceiling,
+    )?;
+    assert_eq!(mixed.tcp_allow_public_ports, vec![80, 443]);
+    assert_eq!(
+        mixed.tcp_allow,
+        vec![Endpoint {
+            host: "github.com".into(),
+            port: 443
+        }]
+    );
+    // An out-of-range public port is refused, not truncated.
+    assert!(compile(with(0, vec![65_536 + 443])).is_err());
+    Ok(())
 }

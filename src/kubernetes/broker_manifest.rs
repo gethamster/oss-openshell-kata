@@ -106,11 +106,19 @@ pub(super) fn network_policy(
         binding.namespace == config.broker_namespace,
         "broker namespace differs"
     );
+    // Public ports get the same private, baseline and inventory exclusions.
     let ports: std::collections::BTreeSet<_> = config
         .operator_ceiling
         .tcp_allow
         .iter()
         .map(|e| e.port)
+        .chain(
+            config
+                .operator_ceiling
+                .tcp_allow_public_ports
+                .iter()
+                .copied(),
+        )
         .collect();
     let mut egress = vec![
         json!({"to":[{"namespaceSelector":{"matchLabels":config.resolver_namespace_labels},"podSelector":{"matchLabels":config.resolver_pod_labels}}],"ports":[{"protocol":"UDP","port":53},{"protocol":"TCP","port":53}]}),

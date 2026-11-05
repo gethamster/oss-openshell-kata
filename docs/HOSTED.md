@@ -81,10 +81,65 @@ This profile uses the local runtime's native TCP compiler. Rules must select
 all executables with `/**`, exact DNS names or global IP literals, explicit TCP
 ports and TLS skip. It provides TCP destination authorization. It does not
 inspect TLS SNI or establish HTTP Host identity at an allowed shared address.
-There is no wildcard, credential, L7, guest filesystem or process identity
-capability. Native policy may narrow both the operator ceiling and the immutable
+The only wildcard is the opt-in public-port capability below. There is no
+credential, L7, guest filesystem or process identity capability. Native policy may narrow both the operator ceiling and the immutable
 original caller capability. An empty caller policy never gains internet access.
 Global effective policies are unsupported for this profile.
+
+### Public hosts on chosen ports (build sandboxes)
+
+An operator ceiling may list `tcp_allow_public_ports`, for example `[443, 80]`.
+The field is optional; a ceiling without it keeps the exact behaviour above. It
+is intended for build sandboxes, such as the System snapshot builder, that fetch
+dependencies from hosts no one can list in advance. Do not grant it to thread
+or workspace sandboxes.
+
+A native rule requests a public port with host `**`, the all-executables
+selector and `tls: skip`. An empty host is still refused:
+
+```yaml
+network_policies:
+  build_downloads:
+    endpoints:
+      - host: "**"
+        ports: [443, 80]
+        tls: skip
+    binaries:
+      - path: "/**"
+```
+
+Each requested port must be a public port of the operator ceiling and of the
+original caller capability; otherwise the policy is refused. Exact rules in the
+same policy are unchanged. A public port never admits inspected REST: an
+inspected host needs its own exact ceiling entry. The capability is
+hosted-only; the local `docker-vm` profile refuses the field. On a public port
+the broker:
+
+- admits a well-formed DNS name only. It refuses every IP literal, a
+  single-label name and a name whose last label starts with a digit, which a
+  resolver can read as an IPv4 address (for example `8.8.1028`);
+- refuses names under `protected_hostname_suffixes`;
+- refuses the request when any resolved address is not globally routable or is
+  inside the baseline or inventory denied CIDRs;
+- applies the same checks to CONNECT tunnels and to plain-HTTP forward
+  requests;
+- relays TLS opaquely. It never inspects public-port traffic or injects
+  credentials.
+
+The protected-suffix check is name-based. It does not stop a guest-controlled
+DNS name that resolves to the public address of a protected host. Address-level
+denial comes only from the denied CIDRs. To deny a protected host by address,
+the operator must list its addresses in `baseline_denied_cidrs`, or list its
+exact name in the inventory configuration's `protected_hostnames` so that the
+inventory denies its resolved addresses. A suffix in
+`protected_hostname_suffixes` alone gives no address-level denial.
+
+Port 80 is plain HTTP. The guest, the network path and the origin can read and
+change that traffic. Grant port 80 only where a builder needs package mirrors
+that serve plain HTTP, and rely on the package manager's own signatures.
+
+The broker Pod's NetworkPolicy adds the public ports to its allowed egress ports
+with the same private-range, baseline and inventory exclusions.
 
 Each launch creates a tokenless trusted broker Pod outside the Kata namespace.
 It starts denied. Proxy settings are installed before the guest starts, including
