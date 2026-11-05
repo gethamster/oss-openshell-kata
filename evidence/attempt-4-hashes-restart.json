@@ -1,9 +1,0 @@
-{
-  "index.html": "e5e3ea1a022300cdac03783cad291eb4f6b2e7d80124759689d12e7b8fa4f7d3",
-  "probe.sh": "49b18090d66bf0e6d46667ec6fdd75e1bfc87024215248dd127c4af9fcfc68e3",
-  "Dockerfile": "4e07ecf065e109739f0a9de6afdffdcd82e0adb26da8b3681936f2a59e7ea071",
-  "large.bin": "d3f498fe58c7c164352236d241b93fa7efbcfac323e0706bcdcf013386a6acb7",
-  "binary.dat": "7daca2095d0438260fa849183dfc67faa459fdf4936e1bc91eec6b281b27e4c2",
-  "compose.yaml": "e4eeb9dc484539c2f2dd7c8307055b4dacb27b9bed5e6ef99e9aaa261d192af9",
-  "nested/text.txt": "674ebfe34c6d39670f482736a3b4688bfa422c52e4ec2dee556d5d827ace209e"
-}
