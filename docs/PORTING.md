@@ -85,31 +85,14 @@ Validation commands: `cargo fmt --check`, `cargo clippy --all-targets
 generated protobuf modules is excluded; an instrumented integration run is
 required to exercise real gateway session and lifecycle branches.
 
-## Local tooling port
+## Local tooling
 
-The local control and qualification commands now run in the `kata-dev` Rust
-binary. They invoke the pinned official OpenShell binaries and system tools;
-no Python interpreter is needed to install, start, stop, or exercise the local
-adapter. Existing `.local` credentials remain in place.
+Local control and qualification use the `kata-dev` Rust binary, the pinned
+OpenShell binaries, and system tools. The current commands are documented in
+[the README](../README.md#local-development). Existing `.local` credentials
+remain in place.
 
-| Previous Python entry point | Rust command / implementation |
-| --- | --- |
-| `scripts/cli.py` | `kata-dev cli -- ...`; replaces itself with the official CLI and preserves the terminal |
-| `scripts/local.py` | `devtools/local.rs`; isolated environment, bounded command lifetime, evidence records |
-| `scripts/setup_gateway.py` | `kata-dev setup-gateway`; preserves existing PKI and registers only isolated local state |
-| `scripts/services.py start` | `kata-dev services start --vm-policy /absolute/profile.json`; uses the Rust `kata-runtime` binary |
-| `scripts/services.py stop` | `kata-dev services stop`; checks executable, process group, and recorded start time before signaling |
-| `scripts/fetch_openshell.py` | `kata-dev fetch-openshell`; verifies pinned archive SHA-256 before extracting only the expected regular binary |
-| `scripts/verify_upstream.py` | `kata-dev verify-upstream`; verifies the vendored source manifest |
-| `scripts/e2e.py` | `kata-dev e2e --policy /absolute/native-policy.yaml`; official CLI transfer, Docker build, Compose, preview, restart, and delete checks |
-
-The three original `test_tools.py` behaviors map to Rust tests named
-`credential_environment_is_not_inherited`, `failure_is_recorded_before_returning`,
-and `timeout_closes_descendant_output_pipes`. Additional tests cover archive
-member types and duplication, checksum path traversal, existing PKI preservation,
-private process records, stale sockets, and reused PIDs.
-
-The new service command requires an explicit VM policy and does not enable the
+The service command requires an explicit VM policy and does not enable the
 prototype policy bypass. The end-to-end command similarly requires an explicit
 native OpenShell policy. Its large fixture remains 16 MiB, but deterministic
 SHA-256 blocks replace Python's SHAKE-256 fixture generator; transfer equality
@@ -118,10 +101,6 @@ fixture now executes a `RUN` instruction as well as `COPY` and Compose startup.
 Official tool download still requires `curl`; archive decoding and verified
 member extraction run in Rust. These are development dependencies, separate
 from the Rust adapter and lifecycle executable.
-
-Local tooling verification: `CARGO_INCREMENTAL=0 cargo test --bin kata-dev`
-passed 12 tests. The actual end-to-end environment remains a separate required
-qualification and is not implied by those unit and component tests.
 
 By default each invocation that records evidence uses a fresh
 `evidence/local-runs/<timestamp>-<pid>` directory. Pass global
