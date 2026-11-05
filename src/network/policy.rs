@@ -62,7 +62,7 @@ pub struct NetworkPolicy {
     /// opaquely. Each must also appear in `tcp_allow`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tls_inspect: Vec<InspectedEndpoint>,
-    /// TCP ports on which any public DNS name or global IP literal is allowed.
+    /// TCP ports on which any public DNS name is allowed; IP literals are not.
     /// The broker still refuses every non-global, denied or protected
     /// destination, and never inspects or injects credentials for them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -102,6 +102,11 @@ impl NetworkPolicy {
             .tcp_allow
             .iter()
             .all(|entry| ceiling.allows(&entry.host, entry.port))
+            // A public port never grants inspection or credential injection.
+            && normalized
+                .tls_inspect
+                .iter()
+                .all(|entry| ceiling.allows_exact(&entry.host, entry.port))
             && normalized
                 .tcp_allow_public_ports
                 .iter()
@@ -174,18 +179,20 @@ impl ValidatedNetworkPolicy {
             tcp_allow_public_ports: self.public_ports.iter().copied().collect(),
         }
     }
-    /// Admit an exact destination, or any well-formed public host on a public
-    /// port. Callers must still require globally routable resolved addresses.
+    /// Admit an exact destination, or any public DNS name on a public port.
+    /// A public port never admits an IP literal: protected-suffix checks
+    /// apply to names only. Callers must still require globally routable,
+    /// non-denied resolved addresses.
     pub fn allows(&self, host: &str, port: u16) -> bool {
         let Ok(host) = normalize_host(host) else {
             return false;
         };
-        if self.public_ports.contains(&port)
-            && host.parse::<IpAddr>().ok().is_none_or(globally_routable)
-        {
-            return true;
-        }
-        self.allowed.contains(&Endpoint { host, port })
+        (self.public_ports.contains(&port) && is_public_name(&host))
+            || self.allowed.contains(&Endpoint { host, port })
+    }
+    /// Admit only an exact destination, never through a public port.
+    pub fn allows_exact(&self, host: &str, port: u16) -> bool {
+        normalize_host(host).is_ok_and(|host| self.allowed.contains(&Endpoint { host, port }))
     }
     /// Whether any host is admitted on this port.
     pub fn allows_public_port(&self, port: u16) -> bool {
@@ -218,6 +225,17 @@ pub fn normalize_host(host: &str) -> Result<String> {
         bail!("hostname must be an exact ASCII DNS name");
     }
     Ok(name)
+}
+
+/// A normalized DNS name that no resolver can read as an IPv4 address.
+/// `inet_aton` accepts forms such as `8.8.2056` or `0x8.0x8.0x8.0x8`, so the
+/// final label must start with a letter, as every real top-level domain does.
+fn is_public_name(host: &str) -> bool {
+    host.parse::<IpAddr>().is_err()
+        && host
+            .rsplit('.')
+            .next()
+            .is_some_and(|label| label.starts_with(|c: char| c.is_ascii_alphabetic()))
 }
 
 /// Reject private, metadata, loopback, multicast and address-transition ranges.

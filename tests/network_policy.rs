@@ -114,13 +114,23 @@ fn public_port_admits_public_names_only_on_that_port() {
     for host in [
         "example.com",
         "Registry.NPMJS.org.",
-        "1.1.1.1",
-        "2606:4700::1111",
+        "xn--bcher-kva.example",
     ] {
         assert!(policy.allows(host, 443), "refused {host}");
+        // A public port is never an exact grant.
+        assert!(!policy.allows_exact(host, 443), "exact {host}");
     }
     assert!(!policy.allows("example.com", 80));
     for host in [
+        // Global IP literals bypass name-based protected suffixes.
+        "1.1.1.1",
+        "2606:4700::1111",
+        "1.1.1.1.",
+        // inet_aton forms that a system resolver reads as IPv4 addresses.
+        "8.8.1028",
+        "0x8.0x8.0x8.0x8",
+        "010.8.8.8",
+        "example.123",
         "localhost",
         "10.0.0.5",
         "169.254.169.254",

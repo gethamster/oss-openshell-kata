@@ -100,7 +100,14 @@ fn compile(
                     ..Default::default()
                 };
                 requested.validate()?;
-                if !ceiling.allows(&endpoint.host, port) {
+                // Inspection and credentials need an exact ceiling entry;
+                // a public port only ever grants opaque TCP.
+                let within = if access.is_some() {
+                    ceiling.allows_exact(&endpoint.host, port)
+                } else {
+                    ceiling.allows(&endpoint.host, port)
+                };
+                if !within {
                     bail!("native destination exceeds operator network ceiling");
                 }
                 // Policy validation canonicalizes DNS case and terminal dot.
@@ -141,10 +148,10 @@ fn compile(
     Ok(policy)
 }
 
-/// `**` (every name) or an empty host without `allowed_ips` selects any
-/// public destination on the endpoint's ports.
+/// `**` (every name) selects any public DNS name on the endpoint's ports.
+/// An empty host stays invalid, as in OpenShell without `allowed_ips`.
 fn is_public_host(host: &str) -> bool {
-    host == "**" || host.is_empty()
+    host == "**"
 }
 
 /// The supported credential-bearing shape: L7 REST with TLS terminated by the

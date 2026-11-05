@@ -376,3 +376,15 @@ fn operator_image_allowlist_admits_only_pinned_templates_under_one_vm_profile() 
     );
     Ok(())
 }
+#[test]
+fn local_profile_rejects_public_ports() {
+    let mut policy = profile();
+    policy.network.tcp_allow_public_ports = vec![443];
+    let error = policy.validate().expect_err("hosted-only field");
+    assert!(error.to_string().contains("hosted"), "{error}");
+    assert!(policy.digest().is_err());
+    let native = native("**");
+    assert!(policy.compile(&native).is_err());
+    // Without the field the local profile still refuses `**`.
+    assert!(profile().compile(&native).is_err());
+}

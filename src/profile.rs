@@ -46,6 +46,11 @@ impl VmPolicy {
         self.resources.validate(&OperatorCeilings::default())?;
         self.filesystem.validate()?;
         self.network.validate()?;
+        // The local profile has no denied CIDRs or protected names to keep
+        // public-port traffic away from infrastructure; it is hosted-only.
+        if !self.network.tcp_allow_public_ports.is_empty() {
+            bail!("tcp_allow_public_ports is supported only by the hosted network profile");
+        }
         Ok(())
     }
     pub fn digest(&self) -> Result<String> {
