@@ -5,7 +5,7 @@ use rustix::{
     io::Errno,
     process::{Pid, Signal, WaitOptions, getpid, kill_process, wait},
 };
-use std::{io::Read, process::Stdio, time::Duration};
+use std::{process::Stdio, time::Duration};
 
 pub(super) async fn run(
     workspace: &Workspace,
@@ -88,33 +88,34 @@ async fn stop_children() -> Result<()> {
 fn direct_children() -> Result<Vec<Pid>> {
     let parent = getpid().as_raw_nonzero().get() as u32;
     let mut children = Vec::new();
-    for task in std::fs::read_dir("/proc/self/task")? {
-        let path = task?.path().join("children");
-        let file = match std::fs::File::open(path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
+    // /proc/<tid>/children requires CONFIG_CHECKPOINT_RESTORE, which is absent
+    // from some managed VM kernels. Read the same kernel-owned parent identity
+    // from procfs instead. This controller never reaps concurrently with this
+    // scan, so an identified child remains reserved until our wait loop.
+    for (index, entry) in std::fs::read_dir("/proc")?.enumerate() {
+        ensure!(index < 65_536, "workspace process listing limit exceeded");
+        let entry = entry?;
+        let Some(child) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse().ok())
+            .and_then(Pid::from_raw)
+        else {
+            continue;
         };
-        let mut list = String::new();
-        file.take(128 * 1024 + 1).read_to_string(&mut list)?;
-        ensure!(
-            list.len() <= 128 * 1024,
-            "workspace child listing limit exceeded"
-        );
-        for raw in list.split_whitespace() {
-            ensure!(
-                children.len() < 4096,
-                "workspace child count limit exceeded"
-            );
-            let child = Pid::from_raw(raw.parse()?).context("invalid child PID")?;
-            // Never signal a PID obtained from the workspace, command, or an
-            // arbitrary /proc entry: only our own unreaped kernel children.
-            ensure!(
-                identity(child)?.parent == parent,
-                "workspace child ownership changed"
-            );
-            children.push(child);
+        let observed = match identity(child) {
+            Ok(observed) => observed,
+            Err(error) if super::is_missing(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        if observed.parent != parent {
+            continue;
         }
+        ensure!(
+            children.len() < 4096,
+            "workspace child count limit exceeded"
+        );
+        children.push(child);
     }
     Ok(children)
 }
