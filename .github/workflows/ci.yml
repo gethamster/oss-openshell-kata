@@ -40,6 +40,7 @@ jobs:
           toolchain: 1.98.0
           components: rustfmt, clippy
       - name: Format
+        if: matrix.os == 'ubuntu-latest'
         run: |
           cargo +1.98.0 fmt --check
           cargo +1.98.0 fmt --manifest-path fence-ebpf/Cargo.toml --check
@@ -56,4 +57,5 @@ jobs:
       - name: Documentation
         run: cargo +1.98.0 doc --locked --no-deps
       - name: Vendored protocol checksums
+        if: matrix.os == 'ubuntu-latest'
         run: cargo +1.98.0 run --locked --bin kata-dev -- verify-upstream
