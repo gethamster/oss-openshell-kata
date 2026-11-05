@@ -28,6 +28,7 @@ fn config(root: &Path) -> Config {
         recovery_dir: Some(root.join("registry")),
         hosted_network_config: None,
         max_sandboxes: None,
+        workspace_capacities: Vec::new(),
     }
 }
 fn intent() -> Retained {
@@ -276,6 +277,7 @@ fn native_config(root: &Path) -> anyhow::Result<Config> {
         guest_network_cidr: None,
         additional_guest_images: Vec::new(),
         max_sandboxes: Some(4),
+        workspace_capacities: Vec::new(),
         ..config(root)
     })
 }
@@ -292,6 +294,7 @@ fn native_capacity_follows_the_operator_setting() -> anyhow::Result<()> {
     let root = tempfile::tempdir()?;
     let config = Config {
         max_sandboxes: Some(48),
+        workspace_capacities: Vec::new(),
         ..native_config(root.path())?
     };
     let store = Store::for_config(&config)?;
@@ -306,6 +309,7 @@ fn native_capacity_follows_the_operator_setting() -> anyhow::Result<()> {
 
     let lowered = Config {
         max_sandboxes: Some(8),
+        workspace_capacities: Vec::new(),
         ..config.clone()
     };
     assert!(
@@ -314,6 +318,7 @@ fn native_capacity_follows_the_operator_setting() -> anyhow::Result<()> {
     );
     let raised = Config {
         max_sandboxes: Some(64),
+        workspace_capacities: Vec::new(),
         ..config
     };
     let raised_store = Store::for_config(&raised)?;
@@ -333,6 +338,7 @@ fn native_capacity_is_required_bounded_and_native_only() -> anyhow::Result<()> {
     for capacity in [1, 64] {
         Config {
             max_sandboxes: Some(capacity),
+            workspace_capacities: Vec::new(),
             ..native.clone()
         }
         .validate()?;
@@ -340,14 +346,17 @@ fn native_capacity_is_required_bounded_and_native_only() -> anyhow::Result<()> {
     for invalid in [
         Config {
             max_sandboxes: None,
+            workspace_capacities: Vec::new(),
             ..native.clone()
         },
         Config {
             max_sandboxes: Some(0),
+            workspace_capacities: Vec::new(),
             ..native.clone()
         },
         Config {
             max_sandboxes: Some(65),
+            workspace_capacities: Vec::new(),
             ..native.clone()
         },
     ] {
@@ -356,6 +365,7 @@ fn native_capacity_is_required_bounded_and_native_only() -> anyhow::Result<()> {
     }
     let hosted = Config {
         max_sandboxes: Some(4),
+        workspace_capacities: Vec::new(),
         ..config(root.path())
     };
     assert!(

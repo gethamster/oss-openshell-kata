@@ -194,6 +194,7 @@ impl Fixture {
             recovery_dir: None,
             hosted_network_config: None,
             max_sandboxes: None,
+            workspace_capacities: Vec::new(),
         });
         let authentication = serde_json::to_vec(
             &serde_json::json!({"supervisor":{"gateway_token":"initial-credential","ssh_host_private_key":fs::read_to_string(root.join("ssh-key"))?}}),

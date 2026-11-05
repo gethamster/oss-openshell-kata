@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use clap::{Parser, ValueEnum};
-use std::{fmt, path::PathBuf};
+use std::{collections::BTreeMap, fmt, path::PathBuf};
 
 /// Validated immutable target identifier used at runtime boundaries.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -84,8 +84,35 @@ pub struct Config {
     /// lifecycle reads the same `OPENSHELL_KATA_MAX_SANDBOXES` service setting.
     #[arg(long, env = "OPENSHELL_KATA_MAX_SANDBOXES", value_parser = clap::value_parser!(u8).range(1..=i64::from(MAX_SANDBOXES_LIMIT)))]
     pub max_sandboxes: Option<u8>,
+    /// Hosted per-workspace retained-sandbox capacity, as WORKSPACE=COUNT.
+    /// Workspaces without an override retain the two-sandbox pilot limit.
+    #[arg(long = "workspace-capacity")]
+    pub workspace_capacities: Vec<String>,
 }
 impl Config {
+    pub fn configured_workspace_capacities(&self) -> Result<BTreeMap<String, usize>> {
+        let mut capacities = BTreeMap::new();
+        if self.workspace_capacities.len() > 64 {
+            bail!("at most 64 workspace capacity overrides are allowed");
+        }
+        for value in &self.workspace_capacities {
+            let (workspace, count) = value
+                .split_once('=')
+                .ok_or_else(|| anyhow::anyhow!("workspace capacity must be WORKSPACE=COUNT"))?;
+            SandboxId::parse(workspace)?;
+            let count: u8 = count.parse()?;
+            if !(1..=MAX_SANDBOXES_LIMIT).contains(&count) {
+                bail!("workspace capacity must be between 1 and {MAX_SANDBOXES_LIMIT}");
+            }
+            if capacities
+                .insert(workspace.to_owned(), usize::from(count))
+                .is_some()
+            {
+                bail!("duplicate workspace capacity override");
+            }
+        }
+        Ok(capacities)
+    }
     /// The operator-admitted guest images: the default image first, then any additional ones.
     pub fn admitted_images(&self) -> Vec<&str> {
         self.guest_image
@@ -174,6 +201,11 @@ impl Config {
         }
         let native_recovery =
             self.runtime_profile == RuntimeProfile::Local && self.recovery_dir.is_some();
+        if !self.configured_workspace_capacities()?.is_empty()
+            && self.runtime_profile != RuntimeProfile::Kubernetes
+        {
+            bail!("workspace capacity overrides apply only to the hosted runtime");
+        }
         match self.max_sandboxes {
             None if native_recovery => {
                 bail!("native recovery requires an explicit --max-sandboxes node capacity")
