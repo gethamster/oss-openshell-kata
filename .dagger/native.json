@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "checks": {
+    "test": [
+      [
+        "env",
+        "RUST_TEST_THREADS=1",
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--all-targets",
+        "--all-features"
+      ],
+      [
+        "cargo",
+        "run",
+        "--locked",
+        "--release",
+        "--bin",
+        "kata-dev",
+        "--",
+        "verify-upstream"
+      ]
+    ]
+  },
+  "build": [
+    [
+      "cargo",
+      "build",
+      "--locked",
+      "--release",
+      "--all-features",
+      "--bins"
+    ],
+    [
+      "python3",
+      "-c",
+      "import os,subprocess; subprocess.run([\"python3\",\"scripts/package-managed.py\",\"--target-dir\",os.environ[\"CARGO_TARGET_DIR\"]+\"/release\",\"--platform\",\"darwin-arm64\",\"--output\",\"dist-native\"],check=True)"
+    ]
+  ],
+  "artifacts": "dist-native"
+}
