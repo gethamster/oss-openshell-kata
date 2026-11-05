@@ -654,3 +654,51 @@ fn records_the_operator_profile_no_longer_admits_are_retired_not_fatal() -> anyh
     }));
     Ok(())
 }
+
+#[test]
+fn hosted_workspace_capacity_is_scoped_and_preserves_existing_records() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut config = config(root.path());
+    config.workspace_capacities = vec!["tenant-a=3".into()];
+    let store = Store::for_config(&config)?;
+    for (workspace, count) in [("tenant-a", 3), ("tenant-b", 2)] {
+        for index in 0..count {
+            let mut record = intent();
+            record.sandbox.id = format!("{workspace}-{index}");
+            record.sandbox.workspace = workspace.into();
+            store.save(&record)?;
+        }
+        let mut rejected = intent();
+        rejected.sandbox.id = format!("{workspace}-overflow");
+        rejected.sandbox.workspace = workspace.into();
+        assert!(store.save(&rejected).is_err());
+    }
+    config.workspace_capacities.clear();
+    let lowered = Store::for_config(&config)?;
+    assert_eq!(lowered.load(&config)?.admitted.len(), 5);
+    let mut retained = intent();
+    retained.sandbox.id = "tenant-a-0".into();
+    lowered.save(&retained)?;
+    assert_eq!(lowered.load(&config)?.admitted.len(), 5);
+    Ok(())
+}
+
+#[test]
+fn hosted_workspace_capacity_rejects_invalid_or_duplicate_overrides() {
+    let root = tempfile::tempdir().unwrap();
+    for entries in [
+        vec!["tenant-a=0"],
+        vec!["tenant-a=65"],
+        vec!["tenant-a"],
+        vec!["../tenant=3"],
+        vec!["tenant-a=3", "tenant-a=4"],
+    ] {
+        let mut config = config(root.path());
+        config.workspace_capacities = entries.into_iter().map(str::to_owned).collect();
+        assert!(config.validate().is_err());
+        assert!(Store::for_config(&config).is_err());
+    }
+    let mut native = native_config(root.path()).unwrap();
+    native.workspace_capacities = vec!["tenant-a=3".into()];
+    assert!(native.validate().is_err());
+}

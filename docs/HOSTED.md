@@ -212,6 +212,14 @@ Stopped with Ready false. A fresh authenticated Start must repeat admission and
 runtime verification. Corrupt records or unconfirmed cleanup prevent serving;
 this is not a transparent session-resume mechanism.
 
+Hosted recovery admits two retained sandboxes per workspace by default, including
+stopped guests. An operator can set `--workspace-capacity tenant-a=3` for one
+workspace; repeat the option for other explicit overrides. Counts must be between
+1 and 64, and duplicate workspace entries are rejected. This changes only new
+recovery reservations, preserves existing records, and does not enlarge Kubernetes
+compute or storage quotas. Unlisted workspaces retain their default limit. Native
+node capacity continues to use `--max-sandboxes` independently.
+
 ## Integration and qualification
 
 The `kata-workspace` Rust helper is baked into both guest recipes at

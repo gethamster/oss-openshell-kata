@@ -90,6 +90,7 @@ pub struct Config {
     pub workspace_capacities: Vec<String>,
 }
 impl Config {
+    /// Parse bounded operator overrides without changing unlisted workspace limits.
     pub fn configured_workspace_capacities(&self) -> Result<BTreeMap<String, usize>> {
         let mut capacities = BTreeMap::new();
         if self.workspace_capacities.len() > 64 {
@@ -99,7 +100,8 @@ impl Config {
             let (workspace, count) = value
                 .split_once('=')
                 .ok_or_else(|| anyhow::anyhow!("workspace capacity must be WORKSPACE=COUNT"))?;
-            SandboxId::parse(workspace)?;
+            SandboxId::parse(workspace)
+                .map_err(|_| anyhow::anyhow!("invalid workspace capacity identifier"))?;
             let count: u8 = count.parse()?;
             if !(1..=MAX_SANDBOXES_LIMIT).contains(&count) {
                 bail!("workspace capacity must be between 1 and {MAX_SANDBOXES_LIMIT}");
