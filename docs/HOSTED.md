@@ -9,7 +9,8 @@ Select the hosted profile with `--runtime-profile kubernetes`, an immutable
 absolute `--recovery-dir`, and `--lifecycle /usr/local/bin/kata-kubernetes`.
 Repeat `--additional-guest-image repository@sha256:...` to admit operator-pinned
 owner images alongside the default image. Every admitted image uses the same
-two-vCPU, 4-GiB resource profile and network ceiling. The authenticated sandbox
+network ceiling and the default resource shape, unless a declared resource shape
+below applies. The authenticated sandbox
 template selects only an admitted digest; workload inputs cannot alter the
 allowlist or runtime settings. Lifecycle and proof checks use that selected
 image. Recovery retains the original image while it remains admitted, even if
@@ -33,11 +34,58 @@ adds another allowed principal and is not accepted from workload requests.
 
 The launcher derives `sandbox-<workspace>` from gateway-owned metadata and
 checks existing namespace labels. It never creates namespaces. Each sandbox
-has a Kata Pod, a private 19 GiB RWO PVC, an SSH Secret and selecting network
-policy. The profile is two vCPU, 4 GiB memory and 1 GiB ephemeral storage.
+has a Kata Pod, a private RWO PVC, an SSH Secret and selecting network policy.
+The PVC holds `/sandbox` and the guest Docker data root `/var/lib/docker`.
 Ephemeral storage uses Kubernetes accounting and eviction, not an instantaneous
 block quota. The local block-backed profile separately supports one vCPU and
-2 GiB memory/disk. Operator-owned templates must match the selected profile.
+2 GiB memory/disk. Operator-owned templates must match the selected shape.
+
+### Resource shapes
+
+The default shape is two vCPU, 4 GiB memory, a 19 GiB PVC and 1 GiB ephemeral
+storage. A template with no resources, or with only these values, uses it.
+
+The operator can declare a larger shape on the adapter, for example for the
+System snapshot builder:
+
+```sh
+--resource-shape build=4,8Gi,100Gi
+```
+
+The format is `NAME=CPU,MEMORY,STORAGE`: whole vCPUs, whole GiB of memory and
+whole GiB of PVC. A template selects a declared shape only when it requests
+exactly that CPU and memory (System Access sends `4` and `8Gi` for the
+`owner-4cpu-8gib` placement profile). Native policy, environment and guest input
+cannot select a shape. Any other request, and a request for a shape that is not
+declared, is refused.
+
+The adapter refuses a declaration that:
+
+- is above the hosted ceiling of 8 vCPU, 32 GiB memory and 200 GiB PVC (one
+  `n2-standard-8` class Kata worker);
+- uses the reserved name `default`, or the default CPU and memory;
+- repeats a name, or the CPU and memory of another declared shape;
+- is one of more than 8 declarations, or is set on the local runtime.
+
+The adapter passes the selected declaration to the launcher as
+`OPENSHELL_KATA_RESOURCE_SHAPE` on create and start. The launcher sizes the Pod
+requests and limits and the PVC request from it, and keeps it in retained
+state. Start refuses a different shape for retained state or an existing PVC
+of another size. Live proof requires the exact Pod limits and PVC size of the
+retained shape, and reports the shape in `resource_shape`. The adapter refuses a
+proof whose CPU, memory or shape differs from the shape that the template
+selected. Billing records the Pod's actual vCPU and memory. Removing a
+declaration retires retained sandboxes that use it at the next adapter start.
+
+The default shape keeps the earlier Pod, PVC, retained state and proof bytes.
+Retained state and proof are `deny_unknown_fields` records, so an earlier
+release cannot read a retained sandbox with a declared shape. To roll back,
+first remove `--resource-shape` and delete the sandboxes that used it, then
+install the earlier release.
+
+The shape does not change the Docker storage driver. The guest uses `vfs`, which
+copies each image layer in full, so Docker builds need much more PVC space than
+the image size.
 
 `OPENSHELL_KATA_BILLING_CONFIG` optionally selects a private JSON file containing
 `url`, `token_file`, and `outbox_dir`. The authority file must be private and the

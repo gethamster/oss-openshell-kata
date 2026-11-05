@@ -1,5 +1,5 @@
 //! Optional hosted allocation accounting; operator state never contains guest data.
-use super::{client::Client, lease, manifest, policy};
+use super::{client::Client, lease, policy};
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -168,17 +168,39 @@ pub(super) async fn observe(workspace: &str, pod: &Value) -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis() as i64;
     ensure!(allocated <= now, "allocation timestamp is in the future");
-    let resources = &pod["spec"]["containers"][0]["resources"];
-    ensure!(
-        resources["requests"]["cpu"] == manifest::limits()["cpu"]
-            && resources["requests"]["memory"] == manifest::limits()["memory"],
-        "billing resource profile differs"
-    );
+    let (cpu, memory_gib) = billed_resources(&pod["spec"]["containers"][0]["resources"])?;
     let stamp = chrono::DateTime::from_timestamp_millis(now)
         .context("invalid observation time")?
         .to_rfc3339();
-    billing.publish(&json!({"resourceId":workspace,"generation":generation,"sandboxId":pod["metadata"]["annotations"][lease::SANDBOX],"cpuMillis":2000,"memoryBytes":4_i64*1024*1024*1024,"allocatedAt":start,"observedAt":stamp,"releasedAt":null})).await?;
+    billing.publish(&json!({"resourceId":workspace,"generation":generation,"sandboxId":pod["metadata"]["annotations"][lease::SANDBOX],"cpuMillis":u64::from(cpu)*1000,"memoryBytes":i64::from(memory_gib)*1024*1024*1024,"allocatedAt":start,"observedAt":stamp,"releasedAt":null})).await?;
     reserve(workspace, generation).await
+}
+
+/// The guest's whole vCPUs and GiB memory: requests equal limits and stay within
+/// the hosted resource-shape ceiling. The default shape bills 2000 millicores and 4 GiB.
+fn billed_resources(resources: &Value) -> Result<(u32, u32)> {
+    let (requests, limits) = (&resources["requests"], &resources["limits"]);
+    ensure!(
+        requests["cpu"] == limits["cpu"] && requests["memory"] == limits["memory"],
+        "billing resource profile differs"
+    );
+    let cpu: u32 = requests["cpu"]
+        .as_str()
+        .context("billing resource profile differs")?
+        .parse()
+        .context("billing resource profile differs")?;
+    let memory_gib: u32 = requests["memory"]
+        .as_str()
+        .and_then(|memory| memory.strip_suffix("Gi"))
+        .context("billing resource profile differs")?
+        .parse()
+        .context("billing resource profile differs")?;
+    ensure!(
+        (1..=crate::resource_shape::MAX_CPU).contains(&cpu)
+            && (1..=crate::resource_shape::MAX_MEMORY_GIB).contains(&memory_gib),
+        "billing resource profile differs"
+    );
+    Ok((cpu, memory_gib))
 }
 
 pub(super) async fn release(generation: &str) -> Result<()> {

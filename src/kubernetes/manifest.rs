@@ -1,5 +1,6 @@
 //! Operator-owned Kubernetes resources for one isolated sandbox.
 
+use crate::resource_shape::ResourceShape;
 use serde_json::{Value, json};
 
 pub(super) const RUNTIME: &str = "kata-qemu-runtime-rs";
@@ -23,8 +24,8 @@ pub(super) fn metadata(name: &str, namespace: &str) -> Value {
     json!({"name":name,"namespace":namespace,"labels":labels(name)})
 }
 
-pub(super) fn limits() -> Value {
-    json!({"cpu":"2","memory":"4Gi","ephemeral-storage":"1Gi"})
+pub(super) fn limits(shape: &ResourceShape) -> Value {
+    json!({"cpu":shape.cpu(),"memory":shape.memory(),"ephemeral-storage":"1Gi"})
 }
 
 pub(super) fn network_policy(name: &str, namespace: &str, control_namespace: &str) -> Value {
@@ -37,14 +38,19 @@ pub(super) fn network_policy(name: &str, namespace: &str, control_namespace: &st
             "ports":[{"port":22,"protocol":"TCP"}]}]}})
 }
 
-pub(super) fn pvc(name: &str, namespace: &str, storage_class: &str) -> Value {
+pub(super) fn pvc(
+    name: &str,
+    namespace: &str,
+    storage_class: &str,
+    shape: &ResourceShape,
+) -> Value {
     json!({"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":metadata(name,namespace),
         "spec":{"accessModes":["ReadWriteOnce"],"storageClassName":storage_class,
-        "resources":{"requests":{"storage":"19Gi"}}}})
+        "resources":{"requests":{"storage":shape.storage()}}}})
 }
 
-pub(super) fn pod(name: &str, namespace: &str, image: &str) -> Value {
-    let resources = json!({"requests":limits(),"limits":limits()});
+pub(super) fn pod(name: &str, namespace: &str, image: &str, shape: &ResourceShape) -> Value {
+    let resources = json!({"requests":limits(shape),"limits":limits(shape)});
     json!({"apiVersion":"v1","kind":"Pod","metadata":metadata(name,namespace),"spec":{
         "runtimeClassName":RUNTIME,"serviceAccountName":"openshell-sandbox",
         "automountServiceAccountToken":false,"enableServiceLinks":false,"restartPolicy":"Never",

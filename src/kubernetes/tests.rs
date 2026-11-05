@@ -25,10 +25,14 @@ fn state() -> model::State {
         launch_nonce: Some(uuid::Uuid::new_v4().to_string()),
         owns_volume_for_launch: false,
         expires_at: Some(lease::now().expect("now") + 3600),
+        resource_shape: None,
     }
 }
+fn build_shape() -> crate::resource_shape::ResourceShape {
+    crate::resource_shape::ResourceShape::parse("build=4,8Gi,100Gi").expect("build shape")
+}
 fn observations(state: &model::State) -> proof::Observations {
-    let mut pod = manifest::pod(&state.name, &state.namespace, &state.image);
+    let mut pod = manifest::pod(&state.name, &state.namespace, &state.image, &state.shape());
     pod["metadata"]["uid"] = json!(state.runtime_identity);
     pod["metadata"]["resourceVersion"] = json!("1");
     pod["metadata"]["annotations"] = lease::annotations(
@@ -41,7 +45,12 @@ fn observations(state: &model::State) -> proof::Observations {
     pod["status"] = json!({"phase":"Running","startTime":chrono::DateTime::from_timestamp(lease::now().expect("now") as i64,0).expect("time").to_rfc3339(),"podIP":"10.176.0.5","containerStatuses":[{"ready":true}]});
     proof::Observations {
         pod,
-        pvc: manifest::pvc(&state.name, &state.namespace, "standard-rwo"),
+        pvc: manifest::pvc(
+            &state.name,
+            &state.namespace,
+            "standard-rwo",
+            &state.shape(),
+        ),
         node: json!({"metadata":{"labels":{"pool":"kata-workers","katacontainers.io/kata-runtime":"true"}}}),
         runtime: json!({"handler":manifest::RUNTIME,"metadata":{"annotations":{"katacontainers.io/kata-version":"4.3.1"}}}),
         policies: vec![manifest::network_policy(
@@ -192,7 +201,8 @@ fn ingress_only_policy_is_not_egress_isolation() {
 }
 #[test]
 fn pod_has_private_storage_no_token_fixed_vm_and_no_python_probe() {
-    let pod = manifest::pod("id", "sandbox-1h31c", &image());
+    let default = crate::resource_shape::ResourceShape::default();
+    let pod = manifest::pod("id", "sandbox-1h31c", &image(), &default);
     assert_eq!(pod["spec"]["automountServiceAccountToken"], false);
     assert_eq!(pod["spec"]["runtimeClassName"], manifest::RUNTIME);
     assert_eq!(
@@ -208,9 +218,103 @@ fn pod_has_private_storage_no_token_fixed_vm_and_no_python_probe() {
     );
     assert_eq!(
         pod["spec"]["containers"][0]["resources"]["limits"],
-        manifest::limits()
+        manifest::limits(&default)
     );
     assert!(!pod.to_string().contains("python"));
+}
+#[test]
+fn default_shape_manifests_are_unchanged() {
+    let default = crate::resource_shape::ResourceShape::default();
+    let resources = json!({"cpu":"2","memory":"4Gi","ephemeral-storage":"1Gi"});
+    let pod = manifest::pod("id", "sandbox-1h31c", &image(), &default);
+    for container in ["containers", "initContainers"] {
+        assert_eq!(
+            pod["spec"][container][0]["resources"],
+            json!({"requests":resources,"limits":resources})
+        );
+    }
+    assert_eq!(
+        manifest::pvc("id", "sandbox-1h31c", "standard-rwo", &default)["spec"]["resources"],
+        json!({"requests":{"storage":"19Gi"}})
+    );
+    // Default retained state serializes without the new field, as before.
+    assert!(
+        !serde_json::to_string(&state())
+            .expect("state")
+            .contains("resource_shape")
+    );
+}
+#[test]
+fn declared_shape_sizes_pod_volume_and_proof() {
+    let shape = build_shape();
+    let shaped = model::State {
+        resource_shape: Some(shape.clone()),
+        ..state()
+    };
+    let observed = observations(&shaped);
+    let resources = json!({"cpu":"4","memory":"8Gi","ephemeral-storage":"1Gi"});
+    assert_eq!(
+        observed.pod["spec"]["containers"][0]["resources"],
+        json!({"requests":resources,"limits":resources})
+    );
+    assert_eq!(
+        observed.pvc["spec"]["resources"]["requests"]["storage"],
+        "100Gi"
+    );
+    let (_, proof) = proof::validate(
+        &shaped,
+        "standard-rwo",
+        &observed,
+        &network(),
+        policy::DEFAULT_CONTROL_NAMESPACE,
+    )
+    .expect("shaped proof");
+    assert_eq!(
+        (proof["cpu"].as_str(), proof["memory"].as_str()),
+        (Some("4"), Some("8Gi"))
+    );
+    assert_eq!(
+        proof["resource_shape"],
+        serde_json::to_value(&shape).expect("shape")
+    );
+    // A default-sized Pod or volume cannot stand in for the retained shape,
+    // and a shaped Pod or volume cannot stand in for the default shape.
+    let default_state = state();
+    let default_resources = json!({"cpu":"2","memory":"4Gi","ephemeral-storage":"1Gi"});
+    for (retained, sizes, storage) in [
+        (&shaped, default_resources.clone(), "100Gi"),
+        (&shaped, resources.clone(), "19Gi"),
+        (&default_state, resources.clone(), "19Gi"),
+        (&default_state, default_resources, "100Gi"),
+    ] {
+        let mut changed = observations(retained);
+        changed.pod["spec"]["containers"][0]["resources"] =
+            json!({"requests":sizes,"limits":sizes});
+        changed.pvc["spec"]["resources"]["requests"]["storage"] = json!(storage);
+        assert!(
+            proof::validate(
+                retained,
+                "standard-rwo",
+                &changed,
+                &network(),
+                policy::DEFAULT_CONTROL_NAMESPACE
+            )
+            .is_err()
+        );
+    }
+}
+#[test]
+fn retained_state_rejects_an_explicit_default_shape() {
+    let folder = std::path::Path::new("/state");
+    let mut state = model::State {
+        private_key_path: folder.join("client_key"),
+        known_hosts_path: folder.join("known_hosts"),
+        resource_shape: Some(build_shape()),
+        ..state()
+    };
+    state.validate("id", folder).expect("declared shape");
+    state.resource_shape = Some(crate::resource_shape::ResourceShape::default());
+    assert!(state.validate("id", folder).is_err());
 }
 #[test]
 fn live_proof_binds_uid_image_storage_boot_and_network() {
@@ -413,6 +517,7 @@ esac
             nonce: &nonce,
             storage_class: "standard-rwo",
             network: &network,
+            resource_shape: None,
             lifetime_secs: 3600,
         },
     )
@@ -554,6 +659,7 @@ esac
                 nonce,
                 storage_class: "standard-rwo",
                 network: &network,
+                resource_shape: None,
                 lifetime_secs: 3600,
             },
         )
@@ -771,6 +877,7 @@ async fn expired_or_legacy_stopped_lease_cannot_restart_and_cleanup_remains_allo
                 nonce: &nonce,
                 storage_class: "standard-rwo",
                 network: &network,
+                resource_shape: None,
                 lifetime_secs: 3600,
             },
         )

@@ -23,6 +23,8 @@ fn local_prototype_mode_cannot_be_redirected_by_url_userinfo() {
         hosted_network_config: None,
         max_sandboxes: None,
         workspace_capacities: Vec::new(),
+        resource_shapes: Vec::new(),
+        resource_shape: Default::default(),
     };
     assert!(config.validate().is_ok());
     for endpoint in [
@@ -115,6 +117,8 @@ fn hosted_operator_requires_an_explicit_private_guest_network() {
         hosted_network_config: None,
         max_sandboxes: None,
         workspace_capacities: Vec::new(),
+        resource_shapes: Vec::new(),
+        resource_shape: Default::default(),
     };
     assert!(config.validate().is_err(), "network cannot be implicit");
     config.guest_network_cidr = Some("172.20.0.0/16".into());

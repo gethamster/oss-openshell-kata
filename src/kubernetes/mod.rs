@@ -108,6 +108,7 @@ pub async fn run() -> Result<()> {
                 .context("immutable guest image required")?;
             let storage_class = storage_class()?;
             let network = network()?;
+            let resource_shape = resource_shape()?;
             let nonce = arguments
                 .proof_nonce
                 .unwrap_or_else(uuid::Uuid::new_v4)
@@ -123,6 +124,7 @@ pub async fn run() -> Result<()> {
                     nonce: &nonce,
                     storage_class: &storage_class,
                     network: &network,
+                    resource_shape,
                     lifetime_secs: env::var("OPENSHELL_KATA_LIFETIME_SECS")
                         .unwrap_or_else(|_| "3600".into())
                         .parse()
@@ -202,6 +204,22 @@ fn storage_class() -> Result<String> {
         .context("explicit operator storage class required")?;
     policy::validate_storage_class(&value)?;
     Ok(value)
+}
+
+/// The adapter-selected declared shape for create/start; absent means the default.
+fn resource_shape() -> Result<Option<crate::resource_shape::ResourceShape>> {
+    let Some(value) = env::var("OPENSHELL_KATA_RESOURCE_SHAPE")
+        .ok()
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    let shape = crate::resource_shape::ResourceShape::parse(&value)?;
+    ensure!(
+        !shape.is_default(),
+        "the default resource shape is implicit"
+    );
+    Ok(Some(shape))
 }
 
 fn network() -> Result<ipnet::IpNet> {

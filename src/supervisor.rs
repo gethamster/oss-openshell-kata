@@ -315,6 +315,7 @@ impl Runtime {
                     path,
                     &spec,
                     config.guest_image.as_deref().unwrap_or(""),
+                    &config.resource_shape,
                 )
             })
             .transpose()?;

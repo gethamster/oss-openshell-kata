@@ -135,7 +135,7 @@ pub(super) fn network_policy(
 }
 
 pub(super) fn guest_pod(state: &super::model::State) -> Value {
-    let mut pod = manifest::pod(&state.name, &state.namespace, &state.image);
+    let mut pod = manifest::pod(&state.name, &state.namespace, &state.image, &state.shape());
     if let Some(binding) = &state.broker {
         pod["spec"]["runtimeClassName"] = json!(manifest::GUARDED_RUNTIME);
         pod["metadata"]["labels"] = guest_labels(&state.name, binding);

@@ -149,6 +149,86 @@ fn hosted_owner_images_use_the_existing_resource_and_policy_ceiling() -> anyhow:
     Ok(())
 }
 
+fn with_resources(image: &str, cpu: &str, memory: &str) -> c::DriverSandbox {
+    let mut request = sandbox(image);
+    request
+        .spec
+        .as_mut()
+        .expect("spec")
+        .template
+        .as_mut()
+        .expect("template")
+        .resources = Some(c::DriverResourceRequirements {
+        cpu_request: cpu.into(),
+        cpu_limit: cpu.into(),
+        memory_request: memory.into(),
+        memory_limit: memory.into(),
+    });
+    request
+}
+
+#[test]
+fn only_operator_declared_shapes_admit_larger_hosted_templates() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let thread = image("thread-minion", 'b');
+    let builder = with_resources(&thread, "4", "8Gi");
+    let undeclared = config(root.path());
+    assert!(
+        undeclared.validate_request(&builder).is_err(),
+        "an undeclared shape is refused"
+    );
+    let mut config = undeclared.clone();
+    config.resource_shapes = vec![openshell_kata::resource_shape::ResourceShape::parse(
+        "build=4,8Gi,100Gi",
+    )?];
+    config.validate()?;
+    config.validate_request(&builder)?;
+    let selected = config.for_sandbox(&builder);
+    assert_eq!(selected.resource_shape, config.resource_shapes[0]);
+    assert_eq!(selected.guest_image.as_deref(), Some(thread.as_str()));
+    // Every other template keeps the default shape.
+    for request in [sandbox(&thread), with_resources(&thread, "2", "4Gi")] {
+        config.validate_request(&request)?;
+        assert!(config.for_sandbox(&request).resource_shape.is_default());
+    }
+    for request in [
+        with_resources(&thread, "4", ""),
+        with_resources(&thread, "6", "12Gi"),
+        with_resources(&thread, "4", "4Gi"),
+    ] {
+        assert!(config.validate_request(&request).is_err());
+    }
+    // The ceiling is checked when the adapter parses its arguments.
+    assert!(
+        Config::try_parse_from([
+            "openshell-kata",
+            "--socket",
+            "/tmp/driver.sock",
+            "--gateway-ca",
+            "/tmp/ca",
+            "--lifecycle",
+            "/tmp/lifecycle",
+            "--resource-shape",
+            "build=16,64Gi,500Gi",
+        ])
+        .is_err()
+    );
+    let mut duplicate = config.clone();
+    duplicate
+        .resource_shapes
+        .push(duplicate.resource_shapes[0].clone());
+    assert!(duplicate.validate().is_err());
+    let mut local = config.clone();
+    local.runtime_profile = openshell_kata::config::RuntimeProfile::Local;
+    local.guest_image = None;
+    local.additional_guest_images.clear();
+    local.recovery_dir = None;
+    assert!(local.validate().is_err(), "shapes are hosted-only");
+    local.resource_shapes.clear();
+    local.validate()?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn hosted_recovery_and_restart_keep_the_admitted_original_image() -> anyhow::Result<()> {
     let root = tempfile::tempdir()?;
@@ -211,6 +291,7 @@ async fn hosted_recovery_and_restart_keep_the_admitted_original_image() -> anyho
     proof.validate(
         &recovered,
         selected.guest_image.as_deref().expect("selected"),
+        &selected.resource_shape,
         &retained.runtime_identity,
     )?;
     assert!(
@@ -218,6 +299,7 @@ async fn hosted_recovery_and_restart_keep_the_admitted_original_image() -> anyho
             .validate(
                 &recovered,
                 changed.guest_image.as_deref().expect("default"),
+                &changed.resource_shape,
                 &retained.runtime_identity
             )
             .is_err()

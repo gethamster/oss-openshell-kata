@@ -14,10 +14,15 @@ pub(crate) struct RuntimeNetwork {
 }
 
 impl RuntimeNetwork {
-    pub(crate) fn new(path: &Path, sandbox: &DriverSandbox, image: &str) -> Result<Self> {
+    pub(crate) fn new(
+        path: &Path,
+        sandbox: &DriverSandbox,
+        image: &str,
+        shape: &crate::resource_shape::ResourceShape,
+    ) -> Result<Self> {
         let operator = HostedNetworkConfig::load(path)?;
         let initial =
-            hosted::validate_brokered_request(sandbox, image, &operator.operator_ceiling)?;
+            hosted::validate_brokered_request(sandbox, image, shape, &operator.operator_ceiling)?;
         Ok(Self { initial })
     }
 

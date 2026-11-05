@@ -4,6 +4,7 @@ use openshell_kata::{
         BrokerBinding, Endpoint, HostedBrokerConfig, NetworkPolicy, hosted_fence::HostedFenceIntent,
     },
     proto::openshell::{compute::v1 as c, sandbox::v1 as s},
+    resource_shape::ResourceShape,
 };
 use serde_json::{Value, json};
 
@@ -112,6 +113,7 @@ fn brokered_proofs_pin_policy_launch_process_and_external_fence() -> anyhow::Res
         serde_json::from_value::<RuntimeProof>(value)?.validate_for_profile(
             &sandbox,
             IMAGE,
+            &ResourceShape::default(),
             POD,
             Some(&path),
             nonce(),
@@ -121,7 +123,7 @@ fn brokered_proofs_pin_policy_launch_process_and_external_fence() -> anyhow::Res
     verify(value.clone())?;
     assert!(
         serde_json::from_value::<RuntimeProof>(value.clone())?
-            .validate(&sandbox, IMAGE, POD)
+            .validate(&sandbox, IMAGE, &ResourceShape::default(), POD)
             .is_err(),
         "legacy profile rejects new authority"
     );
@@ -177,10 +179,26 @@ fn startup_deny_all_is_not_a_successful_authorization() -> anyhow::Result<()> {
     value["broker"]["authorization_expires_at_unix"] = json!(0);
     let proof: RuntimeProof = serde_json::from_value(value)?;
     let path = root.path().join("operator.json");
-    proof.validate_for_profile(&sandbox, IMAGE, POD, Some(&path), nonce(), None)?;
+    proof.validate_for_profile(
+        &sandbox,
+        IMAGE,
+        &ResourceShape::default(),
+        POD,
+        Some(&path),
+        nonce(),
+        None,
+    )?;
     assert!(
         proof
-            .validate_for_profile(&sandbox, IMAGE, POD, Some(&path), nonce(), Some(&policy))
+            .validate_for_profile(
+                &sandbox,
+                IMAGE,
+                &ResourceShape::default(),
+                POD,
+                Some(&path),
+                nonce(),
+                Some(&policy)
+            )
             .is_err()
     );
     Ok(())
