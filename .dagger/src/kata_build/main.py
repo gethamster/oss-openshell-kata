@@ -16,7 +16,7 @@ class KataBuild:
             raise ValueError("Use the enrolled native worker for macOS")
         toolchain = dag.container(platform=dagger.Platform(platform)).from_(RUST)
         result = (dag.container(platform=dagger.Platform(platform)).from_(UBUNTU)
-                  .with_exec(["sh", "-ec", "apt-get update && apt-get install -y --no-install-recommends build-essential clang cmake ca-certificates git python3 pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*"])
+                  .with_exec(["sh", "-ec", "apt-get update && apt-get install -y --no-install-recommends build-essential clang cmake ca-certificates git openssh-client python3 pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*"])
                   .with_directory("/usr/local/rustup", toolchain.directory("/usr/local/rustup"))
                   .with_directory("/usr/local/cargo", toolchain.directory("/usr/local/cargo"))
                   .with_env_variable("PATH", "/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
