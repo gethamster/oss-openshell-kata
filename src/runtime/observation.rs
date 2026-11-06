@@ -71,22 +71,36 @@ pub(super) async fn host_process(
             {
                 bail!("host resource limits differ from admitted profile");
             }
-            let threads = node
-                .node(&args(&[
-                    "sh",
-                    "-c",
-                    "cat /proc/$1/task/*/comm",
-                    "sh",
-                    &pid.to_string(),
-                ]))
-                .await?;
-            if String::from_utf8(threads.stdout)?
-                .lines()
-                .filter(|name| name.starts_with("db_vcpu"))
-                .count()
-                != policy.resources.vcpus as usize
-            {
-                bail!("unexpected virtual CPU count");
+            // Kata acknowledges task startup before Dragonball has necessarily
+            // named every vCPU thread. Wait for the admitted count to appear;
+            // transient startup state is not a resource-profile mismatch.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let threads = node
+                    .node(&args(&[
+                        "sh",
+                        "-c",
+                        "cat /proc/$1/task/*/comm",
+                        "sh",
+                        &pid.to_string(),
+                    ]))
+                    .await?;
+                let count = String::from_utf8(threads.stdout)?
+                    .lines()
+                    .filter(|name| name.starts_with("db_vcpu"))
+                    .count();
+                if count == policy.resources.vcpus as usize {
+                    break;
+                }
+                if count > policy.resources.vcpus as usize
+                    || tokio::time::Instant::now() >= deadline
+                {
+                    bail!(
+                        "unexpected virtual CPU count: observed {count}, expected {}",
+                        policy.resources.vcpus
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             }
             return Ok((pid, cgroup));
         }
