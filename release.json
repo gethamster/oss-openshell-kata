@@ -5,5 +5,20 @@
   "checks": {
     "test": "test"
   },
-  "variables_argument": "variables"
+  "variables_argument": "variables",
+  "source_paths": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "build.rs",
+    "src",
+    "proto",
+    "protocol",
+    "fence-ebpf",
+    "runtime",
+    "scripts",
+    "LICENSE",
+    "LICENSE-UPSTREAM",
+    ".dagger",
+    "dagger.json"
+  ]
 }
