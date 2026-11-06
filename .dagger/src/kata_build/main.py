@@ -26,7 +26,6 @@ class KataBuild:
                   .with_mounted_cache("/usr/local/cargo/registry", dag.cache_volume("kata-cargo-registry"))
                   .with_mounted_cache("/target", dag.cache_volume("kata-target-" + platform.replace("/", "-")))
                   .with_env_variable("CARGO_TARGET_DIR", "/target")
-                  .with_env_variable("CARGO_BUILD_JOBS", "2")
                   .with_env_variable("CARGO_INCREMENTAL", "0")
                   .with_env_variable("CC", "clang")
                   .with_env_variable("RUST_TEST_THREADS", "1")
