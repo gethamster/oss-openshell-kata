@@ -310,31 +310,36 @@ fn build_profile_is_explicit_and_preserves_resource_bounds() {
 fn foundry_profile_is_explicit_and_drives_exact_guest_resources() {
     use openshell_kata::runtime::model::ResourceProfile;
     use openshell_kata::runtime::spec::guest_spec_for;
-    let mut p = policy();
-    p.resources.vcpus = 32;
-    p.resources.memory_mib = 131072;
-    p.resources.disk_mib = 262144;
-    assert!(ResourceProfile::Local.validate(&p).is_err());
-    ResourceProfile::FoundryBuild
-        .validate(&p)
-        .expect("explicit build profile");
-    let spec = guest_spec_for(
-        "sample",
-        "/run/netns/sample",
-        "http://10.205.0.1:38080",
-        &p.resources,
-    );
-    assert_eq!(
-        spec["linux"]["resources"]["memory"]["limit"],
-        137438953472u64
-    );
-    assert_eq!(spec["linux"]["resources"]["cpu"]["quota"], 3200000);
-    assert_eq!(
-        spec["annotations"]["io.katacontainers.config.hypervisor.default_vcpus"],
-        "32"
-    );
-    p.resources.disk_mib += 1;
-    assert!(ResourceProfile::FoundryBuild.validate(&p).is_err());
+    for (vcpus, memory_mib) in [(32, 131072), (64, 196608)] {
+        let mut p = policy();
+        p.resources.vcpus = vcpus;
+        p.resources.memory_mib = memory_mib;
+        p.resources.disk_mib = 262144;
+        assert!(ResourceProfile::Local.validate(&p).is_err());
+        ResourceProfile::FoundryBuild
+            .validate(&p)
+            .expect("explicit build profile");
+        let spec = guest_spec_for(
+            "sample",
+            "/run/netns/sample",
+            "http://10.205.0.1:38080",
+            &p.resources,
+        );
+        assert_eq!(
+            spec["linux"]["resources"]["memory"]["limit"],
+            memory_mib * 1024 * 1024
+        );
+        assert_eq!(spec["linux"]["resources"]["cpu"]["quota"], vcpus * 100000);
+        assert_eq!(
+            spec["annotations"]["io.katacontainers.config.hypervisor.default_vcpus"],
+            vcpus.to_string()
+        );
+        p.resources.vcpus -= 1;
+        assert!(ResourceProfile::FoundryBuild.validate(&p).is_err());
+        p.resources.vcpus = vcpus;
+        p.resources.disk_mib += 1;
+        assert!(ResourceProfile::FoundryBuild.validate(&p).is_err());
+    }
 }
 
 #[tokio::test]

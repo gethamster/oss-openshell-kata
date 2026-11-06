@@ -152,24 +152,26 @@ pub enum ResourceProfile {
     Local,
     /// Local builder with 16 CPUs, 48 GiB RAM and 32 GiB private disk.
     Build,
-    /// Foundry builder with 32 CPUs, 128 GiB RAM and 256 GiB private disk.
+    /// Foundry builder with 32/128 or 64/192 CPU/GiB and 256 GiB private disk.
     FoundryBuild,
 }
 impl ResourceProfile {
     /// Require exact admission and storage sizes for the selected node profile.
     pub fn validate(self, policy: &VmPolicy) -> Result<()> {
         policy.validate()?;
-        let expected = match self {
-            Self::Local => (1, 2048, 2048),
-            Self::Build => (16, 49152, 32768),
-            Self::FoundryBuild => (32, 131072, 262144),
-        };
-        if (
+        let resources = (
             policy.resources.vcpus,
             policy.resources.memory_mib,
             policy.resources.disk_mib,
-        ) != expected
-        {
+        );
+        let supported = match self {
+            Self::Local => resources == (1, 2048, 2048),
+            Self::Build => resources == (16, 49152, 32768),
+            Self::FoundryBuild => {
+                matches!(resources, (32, 131072, 262144) | (64, 196608, 262144))
+            }
+        };
+        if !supported {
             bail!("runtime resources differ from selected operator profile");
         }
         Ok(())

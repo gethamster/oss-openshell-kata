@@ -28,8 +28,8 @@ pub struct OperatorCeilings {
 impl Default for OperatorCeilings {
     fn default() -> Self {
         Self {
-            vcpus: 32,
-            memory_mib: 131_072,
+            vcpus: 64,
+            memory_mib: 196_608,
             disk_mib: 1_048_576,
             lifetime_secs: 86_400,
         }

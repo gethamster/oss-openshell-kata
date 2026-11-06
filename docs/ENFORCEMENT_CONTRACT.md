@@ -92,6 +92,7 @@ resource profile with the lifecycle helper's `--resource-profile` argument:
 | `local` | 1 | 2048 | 2048 | Lima or native Linux |
 | `build` | 16 | 49152 | 32768 | Lima |
 | `foundry-build` | 32 | 131072 | 262144 | Native Linux |
+| `foundry-build` | 64 | 196608 | 262144 | Native Linux |
 
 The node's Kata configuration and devmapper snapshot size must match the selected
 profile; mismatches fail before readiness. Lifetime is configurable within the validated
