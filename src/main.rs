@@ -1,7 +1,11 @@
 use clap::Parser;
 use openshell_kata::{
-    config::Config, driver::Driver,
-    proto::openshell::compute::v1::compute_driver_server::ComputeDriverServer,
+    config::Config,
+    driver::Driver,
+    proto::openshell::compute::v1::{
+        compute_driver_operation_settlement_server::ComputeDriverOperationSettlementServer,
+        compute_driver_server::ComputeDriverServer,
+    },
 };
 use std::{
     os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt},
@@ -39,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
     std::fs::set_permissions(&config.socket, std::fs::Permissions::from_mode(0o600))?;
     let shutdown_driver = driver.clone();
     tonic::transport::Server::builder()
+        .add_service(ComputeDriverOperationSettlementServer::new(driver.clone()))
         .add_service(ComputeDriverServer::new(driver))
         .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async {
             let mut terminate =

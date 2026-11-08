@@ -7,6 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "proto/compute_driver.proto",
             "proto/openshell.proto",
             "protocol/kata-guard.proto",
+            "protocol/compute_driver_operation_settlement.proto",
         ],
         &["proto", "protocol"],
     )?;

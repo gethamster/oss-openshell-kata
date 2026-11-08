@@ -1,0 +1,36 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package openshell.compute.v1;
+
+// Optional driver operation settlement extension on the same endpoint.
+//
+// The gateway durably claims each create/start operation before dispatching it
+// and clears the claim when the driver answers. A gateway process that exits
+// while a call is outstanding never sees that answer, so its claim would block
+// stop, start and delete forever. A driver that owns lifecycle work beyond the
+// RPC that started it can resolve that ambiguity: it already knows whether any
+// accepted operation for a sandbox is still running.
+//
+// Baseline generated driver traits remain unchanged. Negotiate
+// openshell.compute.operation-settlement before calling this service.
+service ComputeDriverOperationSettlement {
+  // Return only after every lifecycle operation this driver accepted for the
+  // sandbox before the call has finished, including its compensation, so that
+  // none of them can change platform resources afterwards. It changes no
+  // resources itself. NOT_FOUND is not returned for an unknown sandbox: no
+  // accepted operation is outstanding for it, which is success.
+  rpc SettleSandboxOperations(SettleSandboxOperationsRequest)
+      returns (SettleSandboxOperationsResponse);
+}
+
+message SettleSandboxOperationsRequest {
+  // Stable sandbox ID stored by the gateway.
+  string sandbox_id = 1;
+  // Compute-runtime name used by the driver.
+  string name = 2;
+}
+
+message SettleSandboxOperationsResponse {}

@@ -1,4 +1,5 @@
 mod lifecycle;
+mod settlement;
 
 use crate::{
     admission,
@@ -24,6 +25,7 @@ pub struct Driver {
     registry: Arc<RwLock<Registry>>,
     lifecycle: Arc<LifecycleLocks>,
     recovery_gate: Arc<RwLock<()>>,
+    in_flight: Arc<settlement::InFlight>,
     recovery: Option<Store>,
     operator_policy: Option<crate::profile::VmPolicy>,
 }
@@ -124,6 +126,7 @@ impl Driver {
             registry: Arc::default(),
             lifecycle: Arc::default(),
             recovery_gate: Arc::default(),
+            in_flight: Arc::default(),
             recovery,
             operator_policy,
         })
@@ -433,7 +436,7 @@ impl c::compute_driver_server::ComputeDriver for Driver {
         Ok(Response::new(c::GetCapabilitiesResponse {
             driver_name:"openshell-kata".into(), driver_version:env!("CARGO_PKG_VERSION").into(), default_image:self.config.guest_image.clone().unwrap_or_else(|| "docker:29-dind".into()), driver_reports_runtime_readiness:true,
             resource_admission_policy:r#"v1:{"allow_driver_config":false,"resource_admission":{"enabled":true,"required_labels":{"openshell.ai/sandbox-attachable":"true","openshell.ai/sandbox-attachable-workspace":"${workspace}"}}}"#.into(),
-            extension:Some(e::PeerMetadata { protocol_version:Some(e::ProtocolVersion { major:1,minor:0 }),implementation_name:"openshell-kata".into(),implementation_version:env!("CARGO_PKG_VERSION").into(),supported_capabilities:vec!["openshell.compute.contract".into()],..Default::default() }),..Default::default()
+            extension:Some(e::PeerMetadata { protocol_version:Some(e::ProtocolVersion { major:1,minor:0 }),implementation_name:"openshell-kata".into(),implementation_version:env!("CARGO_PKG_VERSION").into(),supported_capabilities:vec!["openshell.compute.contract".into(), "openshell.compute.operation-settlement".into()],..Default::default() }),..Default::default()
         }))
     }
     async fn authenticate_sandbox(
@@ -463,9 +466,20 @@ impl c::compute_driver_server::ComputeDriver for Driver {
         request: Request<c::CreateSandboxRequest>,
     ) -> Result<Response<c::CreateSandboxResponse>, Status> {
         let driver = self.clone();
-        tokio::spawn(async move { driver.create_sandbox_owned(request).await })
-            .await
-            .map_err(internal)?
+        // Accepted from here: settlement waits for this ticket.
+        let ticket = self.in_flight.enter(
+            request
+                .get_ref()
+                .sandbox
+                .as_ref()
+                .map_or("", |sandbox| sandbox.id.as_str()),
+        );
+        tokio::spawn(async move {
+            let _ticket = ticket;
+            driver.create_sandbox_owned(request).await
+        })
+        .await
+        .map_err(internal)?
     }
     async fn get_sandbox(
         &self,
@@ -513,18 +527,28 @@ impl c::compute_driver_server::ComputeDriver for Driver {
         request: Request<c::StopSandboxRequest>,
     ) -> Result<Response<c::StopSandboxResponse>, Status> {
         let driver = self.clone();
-        tokio::spawn(async move { driver.stop_sandbox_owned(request).await })
-            .await
-            .map_err(internal)?
+        // Accepted from here: settlement waits for this ticket.
+        let ticket = self.in_flight.enter(&request.get_ref().sandbox_id);
+        tokio::spawn(async move {
+            let _ticket = ticket;
+            driver.stop_sandbox_owned(request).await
+        })
+        .await
+        .map_err(internal)?
     }
     async fn start_sandbox(
         &self,
         request: Request<c::StartSandboxRequest>,
     ) -> Result<Response<c::StartSandboxResponse>, Status> {
         let driver = self.clone();
-        tokio::spawn(async move { driver.start_sandbox_owned(request).await })
-            .await
-            .map_err(internal)?
+        // Accepted from here: settlement waits for this ticket.
+        let ticket = self.in_flight.enter(&request.get_ref().sandbox_id);
+        tokio::spawn(async move {
+            let _ticket = ticket;
+            driver.start_sandbox_owned(request).await
+        })
+        .await
+        .map_err(internal)?
     }
     async fn suspend_sandbox(
         &self,
@@ -539,9 +563,14 @@ impl c::compute_driver_server::ComputeDriver for Driver {
         request: Request<c::DeleteSandboxRequest>,
     ) -> Result<Response<c::DeleteSandboxResponse>, Status> {
         let driver = self.clone();
-        tokio::spawn(async move { driver.delete_sandbox_owned(request).await })
-            .await
-            .map_err(internal)?
+        // Accepted from here: settlement waits for this ticket.
+        let ticket = self.in_flight.enter(&request.get_ref().sandbox_id);
+        tokio::spawn(async move {
+            let _ticket = ticket;
+            driver.delete_sandbox_owned(request).await
+        })
+        .await
+        .map_err(internal)?
     }
     type WatchSandboxesStream = ReceiverStream<Result<c::WatchSandboxesEvent, Status>>;
     async fn watch_sandboxes(
