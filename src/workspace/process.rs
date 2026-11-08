@@ -73,7 +73,7 @@ pub async fn run(workspace: &Workspace, id: &str, command: &str) -> Result<i32> 
 /// Run the private session controller, called only by this executable's `run` path.
 ///
 /// # Errors
-/// Rejects invalid identities, unsupported hosts, duplicate records or launch errors.
+/// Rejects invalid identities, unsupported hosts, live or unresolved records, or launch errors.
 pub async fn run_child(workspace: &Workspace, id: &str, command: &str) -> Result<i32> {
     validate_id(id)?;
     let command = validate_command(command)?;
@@ -216,6 +216,9 @@ pub(super) fn process_directory(workspace: &Workspace) -> Result<Dir> {
 #[cfg(target_os = "linux")]
 fn publish_record(workspace: &Workspace, id: &str, record: &Record) -> Result<()> {
     let directory = process_directory(workspace)?;
+    // Serialize stale-record replacement with other launches and completion cleanup.
+    let _lock = lock_records(&directory)?;
+    let replace = stale_record(workspace, id)?;
     let staged = format!(".process-{}", Uuid::new_v4());
     let mut options = super::files::private_file_options();
     options.write(true).create_new(true);
@@ -223,15 +226,77 @@ fn publish_record(workspace: &Workspace, id: &str, record: &Record) -> Result<()
         let mut file = directory.open_with(&staged, &options)?;
         file.write_all(&serde_json::to_vec(record)?)?;
         file.sync_all()?;
-        // A same-directory link publishes a complete record atomically and
-        // refuses an existing UUID; rename would overwrite another controller.
-        directory.hard_link(&staged, &directory, format!("{id}.json"))?;
+        if replace {
+            directory.rename(&staged, &directory, format!("{id}.json"))?;
+        } else {
+            directory.hard_link(&staged, &directory, format!("{id}.json"))?;
+            directory.remove_file(&staged)?;
+        }
         Ok(())
     })();
-    let cleanup = directory.remove_file(&staged);
+    if result.is_err() {
+        let _ = directory.remove_file(&staged);
+    }
     result?;
-    cleanup?;
     super::files::sync_directory(&directory)
+}
+
+#[cfg(target_os = "linux")]
+fn lock_records(directory: &Dir) -> Result<std::fs::File> {
+    let lock = directory.open(".")?.into_std();
+    lock.lock().context("lock workspace process records")?;
+    Ok(lock)
+}
+
+#[cfg(target_os = "linux")]
+fn stale_record(workspace: &Workspace, id: &str) -> Result<bool> {
+    let Some(record) = read_record(workspace, id)? else {
+        return Ok(false);
+    };
+    let command = id.strip_suffix(".hold").unwrap_or(id);
+    let directory = process_directory(workspace)?;
+    for suffix in [
+        "capability.json",
+        "cancel.json",
+        "cancel-ack.json",
+        "cancelled",
+        "drain-failed",
+    ] {
+        match directory.symlink_metadata(format!("{command}.{suffix}")) {
+            Ok(_) => anyhow::bail!("workspace process has retained {suffix} evidence"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if id.ends_with(".hold") {
+        ensure!(
+            read_record(workspace, &format!("{id}-exit"))?.is_none(),
+            "workspace holder has a retained stop request"
+        );
+    }
+    require_stale(&record)?;
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn require_stale(record: &Record) -> Result<()> {
+    ensure!(
+        record.version == 1,
+        "invalid workspace process record version"
+    );
+    let pid = rustix::process::Pid::from_raw(i32::try_from(record.pid)?)
+        .context("invalid workspace controller PID")?;
+    // Abrupt sandbox stops retain the record. Absence or PID reuse proves that
+    // its controller is gone; an unreadable identity cannot establish that.
+    match identity(pid) {
+        Ok(observed) => ensure!(
+            observed.start != record.start,
+            "workspace process identity is still live"
+        ),
+        Err(error) if is_missing(&error) => {}
+        Err(error) => return Err(error.context("read previous workspace process identity")),
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -335,12 +400,16 @@ fn read_record(workspace: &Workspace, id: &str) -> Result<Option<Record>> {
 }
 
 fn cleanup_record(workspace: &Workspace, id: &str, pid: u32) -> Result<()> {
+    let directory = process_directory(workspace)?;
+    #[cfg(target_os = "linux")]
+    let _lock = lock_records(&directory)?;
     if super::capability::read(workspace, id)?.is_some() || drain_failed(workspace, id)? {
         return Ok(());
     }
     if let Some(record) = read_record(workspace, id)? {
         ensure!(record.pid == pid, "workspace process record was replaced");
-        let directory = process_directory(workspace)?;
+        #[cfg(target_os = "linux")]
+        require_stale(&record)?;
         directory.remove_file(format!("{id}.json"))?;
         super::files::sync_directory(&directory)?;
     }
@@ -669,6 +738,10 @@ pub async fn hold(_workspace: &Workspace, id: &str) -> Result<()> {
     #[cfg(not(target_os = "linux"))]
     anyhow::bail!("workspace holding requires Linux")
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "process_restart_tests.rs"]
+mod restart_tests;
 
 #[cfg(test)]
 mod tests {

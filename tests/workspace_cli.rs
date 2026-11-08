@@ -185,6 +185,46 @@ mod linux {
     }
 
     #[test]
+    fn run_restarts_after_abrupt_controller_exit() {
+        let root = tempfile::tempdir().expect("workspace");
+        let id = Uuid::new_v4().to_string();
+        let record_path = root.path().join(format!(".system-processes/{id}.json"));
+        let mut child = spawn(root.path(), &id, &["sleep", "60"]);
+        wait_for(&record_path);
+        let record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&record_path).expect("record")).expect("JSON");
+        let pid = record["pid"].as_u64().expect("controller PID");
+        child.kill().expect("stop launch parent without cleanup");
+        child.wait().expect("reap launch parent");
+        let controller = rustix::process::Pid::from_raw(i32::try_from(pid).expect("PID range"))
+            .expect("controller PID");
+        rustix::process::kill_process_group(controller, rustix::process::Signal::KILL)
+            .expect("stop owned controller session");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Path::new(&format!("/proc/{pid}")).exists() {
+            assert!(Instant::now() < deadline, "controller was not reaped");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            record_path.exists(),
+            "abrupt exit must retain the old record"
+        );
+        let output = spawn(root.path(), &id, &["printf", "restarted"])
+            .wait_with_output()
+            .expect("restart same command UUID");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"restarted");
+        assert!(
+            !record_path.exists(),
+            "completed restart cleans its own record"
+        );
+    }
+
+    #[test]
     fn cancellation_rejects_modified_identity_then_kills_the_exact_session() {
         let root = tempfile::tempdir().expect("workspace");
         let marker = root.path().join("descendant-pid");
