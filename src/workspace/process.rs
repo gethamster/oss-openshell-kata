@@ -529,7 +529,7 @@ pub async fn quiesce(workspace: &Workspace) -> Result<()> {
         })?;
         if !active {
             stop_holders(workspace).await?;
-            match verify_quiescent(workspace) {
+            match reconcile_quiescent(workspace) {
                 Ok(()) => return Ok(()),
                 // An owner shell can enter hold just after its command drains.
                 // Reconcile that late holder; never exempt an unknown process.
@@ -639,6 +639,35 @@ async fn stop_holders(workspace: &Workspace) -> Result<()> {
         let _ = workspace;
         anyhow::bail!("workspace quiescence requires Linux")
     }
+}
+
+/// Recover a failed drain only after a fresh scan proves the whole process
+/// namespace quiescent. Retain the failure evidence under a distinct name; a
+/// reconnect, thaw, or plain export alone must never clear it.
+fn reconcile_quiescent(workspace: &Workspace) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        ensure!(frozen(workspace)?, "workspace is not frozen");
+        let allowed = ancestors(rustix::process::getpid())?;
+        require_quiescent(&allowed)?;
+        let directory = process_directory(workspace)?;
+        let _lock = lock_records(&directory)?;
+        for entry in directory.entries()? {
+            let name = entry?.file_name();
+            if name
+                .to_str()
+                .is_some_and(|name| name.ends_with(".drain-failed"))
+            {
+                directory.rename(
+                    &name,
+                    &directory,
+                    format!("{}.reconciled-{}", name.to_string_lossy(), Uuid::new_v4()),
+                )?;
+            }
+        }
+        super::files::sync_directory(&directory)?;
+    }
+    verify_quiescent(workspace)
 }
 
 /// Recheck the frozen source immediately before reading an export.
