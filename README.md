@@ -84,7 +84,8 @@ signals only its own unreaped children, and waits for all of them to exit. It
 requires neither pidfds nor process-group signals, which normal OpenShell
 workloads prohibit. A failed drain retains evidence and blocks frozen export.
 A later `quiesce` can reconcile it only after a fresh scan proves the entire process
-namespace has no remaining workload; the failure marker is retained under a
+namespace has no remaining workload and retained cancellation identities match;
+the failure marker is retained under a
 reconciled name. Thawing or reconnecting alone never clears the failure.
 
 `hold <uuid>` keeps an interrupted owner workload available for file transfer.

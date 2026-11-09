@@ -652,18 +652,33 @@ fn reconcile_quiescent(workspace: &Workspace) -> Result<()> {
         require_quiescent(&allowed)?;
         let directory = process_directory(workspace)?;
         let _lock = lock_records(&directory)?;
+        let mut failures = Vec::new();
         for entry in directory.entries()? {
             let name = entry?.file_name();
-            if name
+            if let Some(id) = name
                 .to_str()
-                .is_some_and(|name| name.ends_with(".drain-failed"))
+                .and_then(|name| name.strip_suffix(".drain-failed"))
             {
-                directory.rename(
-                    &name,
-                    &directory,
-                    format!("{}.reconciled-{}", name.to_string_lossy(), Uuid::new_v4()),
-                )?;
+                validate_id(id)?;
+                let record = read_record(workspace, id)?;
+                for suffix in ["cancel", "cancel-ack"] {
+                    if let Some(request) = read_record(workspace, &format!("{id}.{suffix}"))? {
+                        ensure!(
+                            record.as_ref() == Some(&request),
+                            "workspace cancellation identity changed"
+                        );
+                    }
+                }
+                failures.push(name);
             }
+        }
+        // Validate every retained identity before reconciling any failure.
+        for name in failures {
+            directory.rename(
+                &name,
+                &directory,
+                format!("{}.reconciled-{}", name.to_string_lossy(), Uuid::new_v4()),
+            )?;
         }
         super::files::sync_directory(&directory)?;
     }
