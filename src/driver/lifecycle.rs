@@ -11,7 +11,7 @@ impl Driver {
             .sandbox
             .ok_or_else(|| Status::invalid_argument("sandbox required"))?;
         let policy = self
-            .policy_for(&sandbox)
+            .policy_for(&self.config, &sandbox)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         let id =
             SandboxId::parse(&sandbox.id).map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -71,7 +71,9 @@ impl Driver {
             String::new(),
         ))?;
         let nonce = uuid::Uuid::new_v4().to_string();
-        let network = self.hosted_network_for(&sandbox).map_err(internal)?;
+        let network = self
+            .hosted_network_for(&self.config, &sandbox)
+            .map_err(internal)?;
         let guest_result = guest::lifecycle_for_network(
             &config,
             "create",
@@ -170,9 +172,11 @@ impl Driver {
                 "retained runtime identity differs",
             ));
         }
-        let config = std::sync::Arc::new(self.config.for_sandbox(&retained.sandbox));
+        // A retained sandbox keeps its own pinned image across releases.
+        let retaining = self.config.retaining(&retained.sandbox);
+        let config = std::sync::Arc::new(retaining.for_sandbox(&retained.sandbox));
         let policy = self
-            .policy_for(&retained.sandbox)
+            .policy_for(&retaining, &retained.sandbox)
             .map_err(internal)?
             .map(|policy| crate::profile::VmPolicy {
                 network: crate::network::NetworkPolicy::default(),
@@ -189,7 +193,7 @@ impl Driver {
         }
         let nonce = uuid::Uuid::new_v4().to_string();
         let network = self
-            .hosted_network_for(&retained.sandbox)
+            .hosted_network_for(&retaining, &retained.sandbox)
             .map_err(internal)?;
         let result = async {
             guest::lifecycle(&self.config, "stop", &id)

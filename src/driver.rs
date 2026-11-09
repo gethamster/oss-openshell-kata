@@ -138,31 +138,35 @@ impl Driver {
             runtime.id.to_string()
         }
     }
+    /// Admit `sandbox` under `config`: the adapter's own for a new sandbox, or
+    /// [`Config::retaining`] for one it already retains.
     fn policy_for(
         &self,
+        config: &Config,
         sandbox: &c::DriverSandbox,
     ) -> anyhow::Result<Option<crate::profile::VmPolicy>> {
         if let Some(policy) = &self.operator_policy {
             return admission::compile_request_for_images(
                 sandbox,
                 policy,
-                &self.config.admitted_images(),
+                &config.admitted_images(),
             )
             .map(Some);
         }
-        self.config.validate_request(sandbox)?;
+        config.validate_request(sandbox)?;
         Ok(None)
     }
     fn hosted_network_for(
         &self,
+        config: &Config,
         sandbox: &c::DriverSandbox,
     ) -> anyhow::Result<Option<crate::network::NetworkPolicy>> {
-        self.config
+        config
             .hosted_network_config
             .as_deref()
             .map(|path| {
                 let operator = crate::kubernetes::HostedNetworkConfig::load(path)?;
-                let selected = self.config.for_sandbox(sandbox);
+                let selected = config.for_sandbox(sandbox);
                 crate::hosted::validate_brokered_request(
                     sandbox,
                     selected.guest_image.as_deref().unwrap_or(""),
@@ -195,7 +199,8 @@ impl Driver {
         }
         for retained in &recovered.admitted {
             let id = SandboxId::parse(&retained.sandbox.id)?;
-            let config = self.config.for_sandbox(&retained.sandbox);
+            let config = self.config.retaining(&retained.sandbox);
+            let config = config.for_sandbox(&retained.sandbox);
             guest::lifecycle(&config, "stop", &id).await?;
         }
         let mut registry = self.registry.write().await;
@@ -457,7 +462,7 @@ impl c::compute_driver_server::ComputeDriver for Driver {
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("sandbox required"))?;
         SandboxId::parse(&sandbox.id).map_err(|e| Status::invalid_argument(e.to_string()))?;
-        self.policy_for(sandbox)
+        self.policy_for(&self.config, sandbox)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         Ok(Response::new(c::ValidateSandboxCreateResponse {}))
     }
@@ -705,7 +710,7 @@ mod watch_tests {
             ..Default::default()
         };
         assert_eq!(
-            driver.hosted_network_for(&sandbox)?,
+            driver.hosted_network_for(&driver.config, &sandbox)?,
             Some(crate::network::NetworkPolicy::default())
         );
         let native = sandbox
@@ -732,7 +737,10 @@ mod watch_tests {
             },
         );
         driver.config.validate_request(&sandbox)?;
-        assert_eq!(driver.hosted_network_for(&sandbox)?, Some(ceiling));
+        assert_eq!(
+            driver.hosted_network_for(&driver.config, &sandbox)?,
+            Some(ceiling)
+        );
         sandbox
             .spec
             .as_mut()
@@ -746,7 +754,7 @@ mod watch_tests {
             .endpoints[0]
             .host = "github.com".into();
         assert!(
-            driver.hosted_network_for(&sandbox).is_err(),
+            driver.hosted_network_for(&driver.config, &sandbox).is_err(),
             "owner cannot widen network authority"
         );
         sandbox
@@ -758,7 +766,7 @@ mod watch_tests {
             .expect("template")
             .image = format!("registry.example/foreign@sha256:{}", "c".repeat(64));
         assert!(
-            driver.hosted_network_for(&sandbox).is_err(),
+            driver.hosted_network_for(&driver.config, &sandbox).is_err(),
             "foreign images remain rejected"
         );
         Ok(())

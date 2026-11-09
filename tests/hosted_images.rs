@@ -308,11 +308,23 @@ async fn hosted_recovery_and_restart_keep_the_admitted_original_image() -> anyho
         .additional_guest_images
         .retain(|image| image != &owner_image);
     let removed = Store::for_config(&changed)?.load(&changed)?;
-    assert!(removed.admitted.is_empty());
+    assert!(
+        removed.retired.is_empty(),
+        "a dropped owner image keeps its sandbox"
+    );
+    let kept = &removed.admitted[0].sandbox;
     assert_eq!(
-        removed.retired.len(),
-        1,
-        "unlisted owner must retire, never rebind"
+        changed
+            .retaining(kept)
+            .for_sandbox(kept)
+            .guest_image
+            .as_deref(),
+        Some(owner_image.as_str()),
+        "an unlisted owner keeps its own image, never rebinds"
+    );
+    assert!(
+        changed.validate_request(&sandbox(&owner_image)).is_err(),
+        "no new sandbox may select an unlisted owner image"
     );
     Ok(())
 }

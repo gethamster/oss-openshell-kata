@@ -166,6 +166,29 @@ impl Config {
         }
     }
 
+    /// The configuration for a sandbox this adapter already retains.
+    ///
+    /// A release may stop admitting the pinned image a retained sandbox was
+    /// created from. New sandboxes can no longer select that image, but the
+    /// retained one keeps it, with its storage, until its owner replaces it; an
+    /// update must not destroy it. Every other admission rule still applies.
+    pub fn retaining(&self, sandbox: &crate::proto::openshell::compute::v1::DriverSandbox) -> Self {
+        let mut config = self.clone();
+        let image = sandbox
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.template.as_ref())
+            .map(|template| template.image.as_str());
+        if let Some(image) = image
+            && config.guest_image.is_some()
+            && !config.admitted_images().contains(&image)
+            && crate::hosted::validate_image(image).is_ok()
+        {
+            config.additional_guest_images.push(image.to_owned());
+        }
+        config
+    }
+
     pub fn validate(&self) -> Result<()> {
         if let Some(path) = &self.hosted_network_config {
             if self.runtime_profile != RuntimeProfile::Kubernetes || !path.is_absolute() {

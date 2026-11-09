@@ -13,9 +13,11 @@ network ceiling and the default resource shape, unless a declared resource shape
 below applies. The authenticated sandbox
 template selects only an admitted digest; workload inputs cannot alter the
 allowlist or runtime settings. Lifecycle and proof checks use that selected
-image. Recovery retains the original image while it remains admitted, even if
-the default changes; removing it retires that sandbox rather than rebinding its
-storage to another image.
+image. A retained sandbox keeps its original image across adapter restarts,
+even after a release changes the default or stops admitting that image: a
+dropped image only stops new sandboxes from selecting it, and the retained one
+runs it, never another image, until its owner replaces or deletes it. Recovery
+still retires a retained sandbox that any other admission rule now rejects.
 
 The adapter passes the exact guest range to the launcher as
 `OPENSHELL_KATA_GUEST_NETWORK_CIDR`; absent or public ranges fail closed.
