@@ -15,7 +15,7 @@ RUN set -eux; \
     ! command -v dockerd; \
     test ! -e /usr/local/sbin/openshell-kata-init; \
     test -x /usr/local/bin/system-agent; \
-    test -x /usr/local/bin/system-minion-entry; \
+    test -f /usr/local/share/system-sandbox/contract || test -x /usr/local/bin/system-minion-entry; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       bash ca-certificates coreutils curl git passwd musl python3; \
@@ -41,7 +41,7 @@ COPY --from=tools /usr/local/bin/docker /usr/local/bin/docker-compose /usr/local
 COPY --from=tools /usr/libexec/openshell/docker /usr/libexec/openshell/docker-compose /usr/libexec/openshell/
 COPY --from=tools /usr/libexec/openshell/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
 RUN test -x /usr/local/bin/system-agent \
-    && test -x /usr/local/bin/system-minion-entry \
+    && { test -f /usr/local/share/system-sandbox/contract || test -x /usr/local/bin/system-minion-entry; } \
     && /usr/libexec/openshell/docker --version \
     && /usr/libexec/openshell/docker-compose version \
     && ! command -v dockerd
