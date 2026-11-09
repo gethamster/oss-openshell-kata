@@ -459,3 +459,23 @@ async fn blocked_creation_does_not_delay_another_sandbox_stop() -> anyhow::Resul
     driver.close().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn shutdown_ends_open_watch_streams_so_a_graceful_stop_drains() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let driver = Driver::new(config(root.path())).expect("valid test configuration");
+    let mut watch = driver
+        .watch_sandboxes(Request::new(c::WatchSandboxesRequest::default()))
+        .await?
+        .into_inner();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(700), watch.next())
+            .await
+            .is_err(),
+        "an idle watch stays open until shutdown"
+    );
+    driver.begin_shutdown();
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(2), watch.next()).await?;
+    assert!(ended.is_none(), "shutdown must end the watch stream");
+    Ok(())
+}

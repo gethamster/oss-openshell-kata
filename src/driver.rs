@@ -16,6 +16,7 @@ use std::{
 };
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
 /// The local compute extension and its owned runtime generations.
@@ -28,6 +29,8 @@ pub struct Driver {
     in_flight: Arc<settlement::InFlight>,
     recovery: Option<Store>,
     operator_policy: Option<crate::profile::VmPolicy>,
+    /// Ends long-lived watch streams so a graceful server shutdown can drain.
+    shutdown: CancellationToken,
 }
 
 #[derive(Default)]
@@ -129,6 +132,7 @@ impl Driver {
             in_flight: Arc::default(),
             recovery,
             operator_policy,
+            shutdown: CancellationToken::new(),
         })
     }
     fn runtime_identity(&self, runtime: &Runtime) -> String {
@@ -239,6 +243,12 @@ impl Driver {
             store.save(retained).map_err(internal)?;
         }
         Ok(())
+    }
+    /// Ends every open `WatchSandboxes` stream. The gateway reconnects to the
+    /// next adapter and takes a fresh snapshot, so nothing is lost; without
+    /// this a graceful stop waits on the endless stream until it is killed.
+    pub fn begin_shutdown(&self) {
+        self.shutdown.cancel();
     }
     pub async fn close(&self) {
         let records: Vec<_> = self
@@ -589,9 +599,16 @@ impl c::compute_driver_server::ComputeDriver for Driver {
             let mut state = WatchState::default();
             let mut initial = true;
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = driver.shutdown.cancelled() => return,
+                    _ = interval.tick() => {}
+                }
                 for id in driver.observation_ids().await {
-                    let Ok(permit) = sender.reserve().await else {
+                    let permit = tokio::select! {
+                        _ = driver.shutdown.cancelled() => return,
+                        permit = sender.reserve() => permit,
+                    };
+                    let Ok(permit) = permit else {
                         return;
                     };
                     // Read after backpressure clears, not before waiting in a
