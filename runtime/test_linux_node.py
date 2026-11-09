@@ -27,11 +27,12 @@ class NativeNodeTests(unittest.TestCase):
                 node.capacity(rejected)
 
     def test_runtime_config_disables_shared_files_and_bounds_hardware(self):
-        original = '[hypervisor.dragonball]\ndefault_vcpus = 1\ndefault_maxvcpus = 1\ndefault_memory = 2048\ndefault_maxmemory = 2048\nshared_fs = "virtio-fs"\nblock_device_driver = "virtio-blk-pci"\n[agent.kata]\ndial_timeout_ms = 10\nreconnect_timeout_ms = 3000\n'
+        original = '[hypervisor.dragonball]\ndefault_vcpus = 1\ndefault_maxvcpus = 1\ndefault_memory = 2048\ndefault_maxmemory = 2048\nshared_fs = "virtio-fs"\nblock_device_driver = "virtio-blk-pci"\nblock_device_cache_direct = false\n[agent.kata]\ndial_timeout_ms = 10\nreconnect_timeout_ms = 3000\n'
         result = node.runtime_configuration(original, "foundry-build")
         self.assertIn('default_maxvcpus = 32', result)
         self.assertIn('default_memory = 131072', result)
         self.assertIn('shared_fs = "none"', result)
+        self.assertIn('block_device_cache_direct = true', result)
         self.assertIn('reconnect_timeout_ms = 10000', result)
         self.assertIn('dial_timeout_ms = 10', result)
         self.assertEqual(node.runtime_configuration(result, "foundry-build"), result)
@@ -122,6 +123,7 @@ class NativeSetupIntegrationTests(unittest.TestCase):
             stack.enter_context(patch.object(node, 'write', fixture_write))
             commands = []
             loop_devices = {}
+            direct = set()
             pool = {'active': False}
 
             def command(*args, **kwargs):
@@ -133,11 +135,18 @@ class NativeSetupIntegrationTests(unittest.TestCase):
                         stream.truncate(int(args[2]))
                 if args[0] == 'tar':
                     runtime.parent.mkdir(parents=True, exist_ok=True)
-                    runtime.write_text('default_vcpus = 1\ndefault_maxvcpus = 1\ndefault_memory = 2048\ndefault_maxmemory = 2048\nshared_fs = "virtio-fs"\nblock_device_driver = "virtio-blk-pci"\n[agent.kata]\ndial_timeout_ms = 10\nreconnect_timeout_ms = 3000\n')
+                    runtime.write_text('default_vcpus = 1\ndefault_maxvcpus = 1\ndefault_memory = 2048\ndefault_maxmemory = 2048\nshared_fs = "virtio-fs"\nblock_device_driver = "virtio-blk-pci"\nblock_device_cache_direct = false\n[agent.kata]\ndial_timeout_ms = 10\nreconnect_timeout_ms = 3000\n')
                 if args[0] == 'losetup':
+                    if '--list' in args:
+                        return '1' if args[-1] in direct else '0'
+                    if args[1] == '--direct-io=on':
+                        direct.add(args[-1])
+                        return ''
                     path = args[-1] if '--find' in args else args[2]
                     if '--find' in args:
+                        self.assertIn('--direct-io=on', args)
                         loop_devices[path] = '/dev/loop' + str(len(loop_devices))
+                        direct.add(loop_devices[path])
                     return loop_devices.get(path, '')
                 if args[0] == 'findmnt':
                     return 'a499b11b-6ff5-4393-96cd-499f3ea0fa1a'
@@ -198,6 +207,10 @@ class NativeSetupIntegrationTests(unittest.TestCase):
             node.reconstruct(evidence)
             node.verify(evidence)
             self.assertEqual(data.read_bytes()[:8], b'RETAINED')
+            # A retained buffered loop device adopts direct I/O in place.
+            direct.clear()
+            node.verify(evidence)
+            self.assertEqual(direct, set(loop_devices.values()))
             self.assertEqual(sum(call[0] == 'fallocate' for call in commands), 2)
             self.assertEqual(sum(call[0] == 'tar' for call in commands), 1, 'repeat setup must not replace running runtime files')
             lost = data.with_name('data.recovery-evidence')

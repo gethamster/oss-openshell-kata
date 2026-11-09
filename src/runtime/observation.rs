@@ -250,11 +250,14 @@ mod tests {
 
     #[test]
     fn large_build_guests_reserve_proportional_host_overhead() {
-        // foundry-build: 128 GiB guest RAM plus a 2 GiB (1/64) host margin.
+        // foundry-build: 128 GiB guest RAM plus a 4 GiB (1/32) host margin.
         let build = limits(32, 131_072, 262_144);
         let guest = Some(137_438_953_472);
-        let host = (137_438_953_472_u64 + 2_147_483_648).to_string();
+        let host = (137_438_953_472_u64 + 4_294_967_296).to_string();
         assert!(valid_memory_limits(&build, guest, &host, &host));
+        // The former 1/64 margin OOM-killed a fully faulted 128 GiB guest's shim.
+        let narrow = (137_438_953_472_u64 + 2_147_483_648).to_string();
+        assert!(!valid_memory_limits(&build, guest, &narrow, &narrow));
         let local_margin = (137_438_953_472_u64 + 268_435_456).to_string();
         assert!(!valid_memory_limits(
             &build,
