@@ -12,15 +12,24 @@ use std::path::{Path, PathBuf};
 const BUNDLES: &str = "/run/containerd/io.containerd.runtime.v2.task/default";
 const SHIM: &str = "/opt/kata/runtime-rs/bin/containerd-shim-kata-v2";
 const CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// Longer than containerd's own dead-shim cleanup, which it abandons after 5 s.
+const CONTAINERD_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Remove an abandoned bundle for `id`; returns whether one existed.
 pub(super) async fn retire_abandoned(id: &str) -> Result<bool> {
     use std::os::unix::fs::MetadataExt;
     super::state::validate_id(id)?;
     let bundle = Path::new(BUNDLES).join(id);
-    let metadata = match std::fs::symlink_metadata(&bundle) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        other => other?,
+    // containerd cleans up a shim that just died by itself; act only on a bundle
+    // that outlives that cleanup, so the two never remove it concurrently.
+    let deadline = tokio::time::Instant::now() + CONTAINERD_GRACE;
+    let metadata = loop {
+        match std::fs::symlink_metadata(&bundle) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Ok(metadata) if tokio::time::Instant::now() >= deadline => break metadata,
+            Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
+            Err(error) => return Err(error.into()),
+        }
     };
     if !metadata.is_dir() || metadata.uid() != 0 {
         bail!("refusing an unexpected task bundle artifact");
@@ -33,7 +42,12 @@ pub(super) async fn retire_abandoned(id: &str) -> Result<bool> {
     if mounted_below(&bundle.join("rootfs"))? {
         bail!("abandoned task bundle still has a mounted root filesystem");
     }
-    std::fs::remove_dir_all(&bundle).context("remove abandoned task bundle")?;
+    match std::fs::remove_dir_all(&bundle) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        other => {
+            other.with_context(|| format!("remove abandoned task bundle {}", bundle.display()))?
+        }
+    }
     if let Some(work) = work {
         match std::fs::remove_dir_all(&work) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
