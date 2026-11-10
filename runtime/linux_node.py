@@ -87,6 +87,11 @@ def runtime_configuration(original, selected):
     replacements = {"default_vcpus": str(cpu), "default_maxvcpus": str(cpu),
                     "default_memory": str(memory), "default_maxmemory": str(memory),
                     "shared_fs": '"none"',
+                    # Open the guest disk with O_DIRECT. The guest caches its own
+                    # disk; buffered host writes would also charge dirty page cache
+                    # to the guest's host memory cgroup, where it competes with fully
+                    # faulted guest RAM and can OOM-kill the shim.
+                    "block_device_cache_direct": "true",
                     # Slow guest boots must not exhaust the agent retry count
                     # before the lifecycle's independently bounded boot ends.
                     "reconnect_timeout_ms": "10000"}
@@ -111,10 +116,19 @@ def loop_device(path, create):
     if len(entries) > 1:
         raise ValueError("backing file has ambiguous loop device ownership")
     if entries:
-        return entries[0].strip()
-    if not create:
+        device = entries[0].strip()
+    elif not create:
         raise ValueError("persistent backing file has no reconstructed loop device")
-    return run("losetup", "--find", "--show", "--nooverlap", str(path))
+    else:
+        device = run("losetup", "--find", "--show", "--nooverlap", "--direct-io=on", str(path))
+    # Guest disk writes must not be cached again in the backing file's page cache,
+    # which the kernel charges to the issuing guest's memory cgroup. Direct I/O is
+    # a device setting, not node identity, so a retained device adopts it in place.
+    if run("losetup", "--list", "--noheadings", "--output", "DIO", device) != "1":
+        run("losetup", "--direct-io=on", device)
+        if run("losetup", "--list", "--noheadings", "--output", "DIO", device) != "1":
+            raise ValueError("pool loop device does not support direct I/O")
+    return device
 
 
 def backing_identities(pool):

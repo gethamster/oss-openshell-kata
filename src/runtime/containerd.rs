@@ -111,13 +111,45 @@ pub async fn reap_shim(id: &str, nonce: &str) -> Result<u32> {
     }
     let count = reap_processes(id)?;
     retire_socket(id).await?;
+    if !task_exists(&mut client, id).await? {
+        super::containerd_bundle::retire_abandoned(id).await?;
+    }
     Ok(count)
+}
+
+async fn task_exists(
+    client: &mut tonic::client::Grpc<tonic::transport::Channel>,
+    id: &str,
+) -> Result<bool> {
+    client
+        .ready()
+        .await
+        .context("containerd RPC is not ready")?;
+    let task: Result<tonic::Response<TaskResponse>, tonic::Status> = client
+        .unary(
+            request(TaskGet {
+                container_id: id.to_owned(),
+                exec_id: String::new(),
+            }),
+            tonic::codegen::http::uri::PathAndQuery::from_static(
+                "/containerd.services.tasks.v1.Tasks/Get",
+            ),
+            tonic_prost::ProstCodec::default(),
+        )
+        .await;
+    match task {
+        Ok(_) => Ok(true),
+        Err(status) if status.code() == tonic::Code::NotFound => Ok(false),
+        Err(status) => Err(status.into()),
+    }
 }
 
 async fn retire_socket(id: &str) -> Result<()> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let path = shim_socket(id)?;
-    for _ in 0..50 {
+    // A SIGKILLed shim exits only after the kernel unmaps all guest RAM, which
+    // takes many seconds for a large guest. Stay within the node command bound.
+    for _ in 0..600 {
         match std::fs::symlink_metadata(&path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error.into()),

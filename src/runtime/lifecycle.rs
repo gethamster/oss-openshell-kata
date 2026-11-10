@@ -534,6 +534,10 @@ async fn start(
     network::start_broker(node, &settings.node_binary, id, &record.policy, spec).await?;
     let mut prepared = record.clone();
     if !running {
+        // A shim that died (for example OOM-killed by its cgroup) leaves its
+        // process group, socket and task bundle behind, and containerd then
+        // refuses every new task for this id. Reap them exactly as stop does.
+        stop_task(node, settings, id, record).await?;
         network::reset_for_restart(node, id, &record.attachment).await?;
         node.node(&args(&[
             "ip",
@@ -551,9 +555,6 @@ async fn start(
         if prepared.deadline.expired_at(now()?) {
             bail!("sandbox lifetime expired before boot");
         }
-        let _ = node
-            .raw_node(&args(&["ctr", "tasks", "delete", "--force", id]))
-            .await?;
         // Large guests initialize their page metadata before the agent can answer.
         // Bound that boot separately from short node operations; the independent
         // VM lifetime watchdog remains active throughout startup.

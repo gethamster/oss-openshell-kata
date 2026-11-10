@@ -522,13 +522,33 @@ async fn recovery_retires_sandboxes_the_new_operator_profile_no_longer_admits() 
         .template
         .as_mut()
         .expect("template")
-        .image = retired_image;
+        .resources = Some(c::DriverResourceRequirements {
+        cpu_request: "16".into(),
+        ..Default::default()
+    });
     store.save(&Retained::new(
         old,
         INSTANCE.into(),
         "old-generation".into(),
     ))?;
-    // The next release no longer admits the previous image.
+    let mut dropped = fixture.intent()?;
+    dropped.id = "dropped-id".into();
+    dropped.workspace = "workspace-dropped".into();
+    dropped
+        .spec
+        .as_mut()
+        .expect("spec")
+        .template
+        .as_mut()
+        .expect("template")
+        .image = retired_image.clone();
+    store.save(&Retained::new(
+        dropped,
+        INSTANCE.into(),
+        "dropped-generation".into(),
+    ))?;
+    // The next release no longer admits the previous image, and the old record's
+    // resources leave the operator profile.
     let config = Arc::new(Config {
         additional_guest_images: Vec::new(),
         ..previous
@@ -537,7 +557,7 @@ async fn recovery_retires_sandboxes_the_new_operator_profile_no_longer_admits() 
     executable(
         &config.lifecycle,
         &format!(
-            "#!/bin/sh\necho \"$1 $2\" >> '{}'\ncase \"$1\" in delete) exit 7 ;; esac\nprintf '{{}}'\n",
+            "#!/bin/sh\necho \"$1 $2 $OPENSHELL_KATA_GUEST_IMAGE\" >> '{}'\ncase \"$1\" in delete) exit 7 ;; esac\nprintf '{{}}'\n",
             log.display()
         ),
     )?;
@@ -559,13 +579,16 @@ async fn recovery_retires_sandboxes_the_new_operator_profile_no_longer_admits() 
                 .collect::<Vec<_>>(),
         )
     };
-    assert_eq!(ids(failing).await?, vec!["fixture-id".to_owned()]);
+    assert_eq!(
+        ids(failing).await?,
+        vec!["dropped-id".to_owned(), "fixture-id".to_owned()]
+    );
 
     fs::remove_file(&log)?;
     executable(
         &config.lifecycle,
         &format!(
-            "#!/bin/sh\necho \"$1 $2\" >> '{}'\nprintf '{{}}'\n",
+            "#!/bin/sh\necho \"$1 $2 $OPENSHELL_KATA_GUEST_IMAGE\" >> '{}'\nprintf '{{}}'\n",
             log.display()
         ),
     )?;
@@ -575,6 +598,12 @@ async fn recovery_retires_sandboxes_the_new_operator_profile_no_longer_admits() 
     assert!(calls.contains("delete retired-id"), "{calls}");
     assert!(calls.contains("stop fixture-id"), "{calls}");
     assert!(!calls.contains("stop retired-id"), "{calls}");
+    // A dropped image alone keeps the sandbox, stopped on its own image.
+    assert!(
+        calls.contains(&format!("stop dropped-id {retired_image}")),
+        "{calls}"
+    );
+    assert!(!calls.contains("delete dropped-id"), "{calls}");
     assert_eq!(
         driver
             .get_sandbox(Request::new(c::GetSandboxRequest {
@@ -588,7 +617,7 @@ async fn recovery_retires_sandboxes_the_new_operator_profile_no_longer_admits() 
     );
     let recovered = Store::for_config(&config)?.load(&config)?;
     assert!(recovered.retired.is_empty(), "retired record removed");
-    assert_eq!(recovered.admitted.len(), 1);
+    assert_eq!(recovered.admitted.len(), 2);
     let mut watch = driver
         .watch_sandboxes(Request::new(c::WatchSandboxesRequest {}))
         .await?
@@ -609,7 +638,10 @@ async fn recovery_retires_sandboxes_the_new_operator_profile_no_longer_admits() 
         deleted,
         "the gateway observes the retired sandbox as deleted"
     );
-    assert_eq!(ids(driver).await?, vec!["fixture-id".to_owned()]);
+    assert_eq!(
+        ids(driver).await?,
+        vec!["dropped-id".to_owned(), "fixture-id".to_owned()]
+    );
     fixture.close().await;
     Ok(())
 }

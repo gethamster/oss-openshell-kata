@@ -149,6 +149,10 @@ pub(super) async fn observe(workspace: &str, pod: &Value) -> Result<()> {
     let generation = pod["metadata"]["annotations"][lease::NONCE]
         .as_str()
         .context("missing launch generation")?;
+    ensure!(
+        !billing.path(generation, "settled")?.exists(),
+        "a released generation requires a fresh start"
+    );
     if !billing.path(generation, "enrolled")?.exists() {
         return Ok(());
     }
@@ -281,6 +285,65 @@ mod tests {
                 "--nocapture",
             ])
             .env(CHILD, "1")
+            .output()
+            .expect("fresh billing process");
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn observe_refuses_a_settled_generation() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD: &str = "KATA_BILLING_SETTLED_TEST_CHILD";
+        const GENERATION: &str = "00000000-0000-4000-8000-000000000001";
+        if let Some(dir) = std::env::var_os(CHILD) {
+            let outbox = std::path::Path::new(&dir).join("outbox");
+            let pod = serde_json::json!({
+                "metadata":{"annotations":{(super::lease::NONCE):GENERATION,(super::lease::SANDBOX):"sandbox"}},
+                "status":{"conditions":[{"type":"PodScheduled","status":"True","lastTransitionTime":"2020-01-01T00:00:00Z"}]},
+                "spec":{"containers":[{"resources":{"requests":{"cpu":"2","memory":"4Gi"},"limits":{"cpu":"2","memory":"4Gi"}}}]}});
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(super::observe("workspace", &pod));
+            let error = result.expect_err("settled generation must be refused");
+            assert!(
+                format!("{error:#}").contains("a released generation requires a fresh start"),
+                "{error:#}"
+            );
+            assert!(!outbox.join(format!("{GENERATION}.json")).exists());
+            assert!(outbox.join(format!("{GENERATION}.settled")).exists());
+            return;
+        }
+        let dir = tempfile::tempdir().expect("temp dir");
+        let outbox = dir.path().join("outbox");
+        std::fs::create_dir(&outbox).expect("outbox");
+        std::fs::write(outbox.join(format!("{GENERATION}.enrolled")), "{}").expect("enrolled");
+        std::fs::write(outbox.join(format!("{GENERATION}.settled")), "{}").expect("settled");
+        let token = dir.path().join("token");
+        std::fs::write(&token, "t".repeat(32)).expect("token");
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).expect("mode");
+        let config = dir.path().join("config.json");
+        std::fs::write(
+            &config,
+            serde_json::to_vec(&serde_json::json!({
+                "url":"https://127.0.0.1:9","token_file":token,"outbox_dir":outbox}))
+            .expect("config"),
+        )
+        .expect("config");
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "kubernetes::billing::tests::observe_refuses_a_settled_generation",
+                "--nocapture",
+            ])
+            .env(CHILD, dir.path())
+            .env("OPENSHELL_KATA_BILLING_CONFIG", &config)
             .output()
             .expect("fresh billing process");
         assert!(

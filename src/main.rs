@@ -42,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = UnixListener::bind(&config.socket)?;
     std::fs::set_permissions(&config.socket, std::fs::Permissions::from_mode(0o600))?;
     let shutdown_driver = driver.clone();
+    let stopping_driver = driver.clone();
     tonic::transport::Server::builder()
         .add_service(ComputeDriverOperationSettlementServer::new(driver.clone()))
         .add_service(ComputeDriverServer::new(driver))
@@ -53,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
                 _ = tokio::signal::ctrl_c() => {},
                 _ = terminate.recv() => {},
             }
+            stopping_driver.begin_shutdown();
         })
         .await?;
     shutdown_driver.close().await;

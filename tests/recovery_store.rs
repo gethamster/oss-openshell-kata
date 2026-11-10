@@ -96,8 +96,14 @@ fn atomic_snapshots_are_private_scrubbed_and_profile_bound() -> anyhow::Result<(
     };
     let rebound = store.load(&changed)?;
     assert!(
-        rebound.admitted.is_empty() && rebound.retired.len() == 1,
-        "operator image change retires retained storage instead of rebinding it"
+        rebound.retired.is_empty() && rebound.admitted.len() == 1,
+        "an operator image change keeps retained storage"
+    );
+    let kept = &rebound.admitted[0].sandbox;
+    assert_eq!(
+        changed.retaining(kept).for_sandbox(kept).guest_image,
+        Some(IMAGE.to_owned()),
+        "retained storage keeps its own image instead of rebinding to the new one"
     );
     store.save(&Retained::new(
         loaded[0].sandbox.clone(),
@@ -566,12 +572,12 @@ fn native_recovery_rejects_changed_public_ca_and_invalid_retained_shape() -> any
         .template
         .as_mut()
         .expect("template")
-        .image = IMAGE.replace("aaaa", "bbbb");
+        .image = "registry.example/guest:latest".into();
     store.save(&invalid)?;
     let recovered = store.load(&config)?;
     assert!(
         recovered.admitted.is_empty(),
-        "a retained image outside the operator profile is never restarted"
+        "a retained image that is not pinned by digest is never restarted"
     );
     assert_eq!(recovered.retired.len(), 1);
     assert!(
@@ -610,7 +616,8 @@ fn with_template(id: &str, edit: impl FnOnce(&mut c::DriverSandboxTemplate)) -> 
 }
 
 #[test]
-fn records_the_operator_profile_no_longer_admits_are_retired_not_fatal() -> anyhow::Result<()> {
+fn records_the_operator_profile_no_longer_admits_are_retired_but_dropped_images_are_kept()
+-> anyhow::Result<()> {
     let root = tempfile::tempdir()?;
     let previous_image = IMAGE.replace("aaaa", "cccc");
     let previous = Config {
@@ -634,19 +641,37 @@ fn records_the_operator_profile_no_longer_admits_are_retired_not_fatal() -> anyh
         ..previous
     };
     let recovered = Store::for_config(&current)?.load(&current)?;
-    let admitted: Vec<_> = recovered
+    let mut admitted: Vec<_> = recovered
         .admitted
         .iter()
         .map(|r| r.sandbox.id.as_str())
         .collect();
+    admitted.sort_unstable();
     let mut retired: Vec<_> = recovered
         .retired
         .iter()
         .map(|r| r.retained.sandbox.id.as_str())
         .collect();
     retired.sort_unstable();
-    assert_eq!(admitted, vec!["kept"]);
-    assert_eq!(retired, vec!["old-image", "old-size"]);
+    // A release that only stops admitting an image keeps the sandboxes created
+    // from it, on that image, instead of destroying them; resources still retire.
+    assert_eq!(admitted, vec!["kept", "old-image"]);
+    assert_eq!(retired, vec!["old-size"]);
+    let kept = &recovered
+        .admitted
+        .iter()
+        .find(|r| r.sandbox.id == "old-image")
+        .expect("kept")
+        .sandbox;
+    assert_eq!(
+        current.retaining(kept).for_sandbox(kept).guest_image,
+        Some(previous_image.clone()),
+        "a retained sandbox is never rebound to another image"
+    );
+    assert!(
+        current.validate_request(kept).is_err(),
+        "no new sandbox may select the dropped image"
+    );
     assert!(recovered.retired.iter().all(|r| {
         r.retained
             .sandbox

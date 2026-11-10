@@ -18,13 +18,15 @@ pub(super) fn guest_memory_bytes(resources: &crate::boundary::process::VmLimits)
 }
 
 /// Host shim budget for one guest. Dragonball maps guest RAM into the shim, so
-/// reserve a bounded host-only margin for the runtime, page tables and device
-/// state without enlarging guest RAM: 256 MiB, or 1/64 of guest RAM for large
-/// guests (page tables alone approach 1/512 of fully touched RAM). This is a
-/// per-guest cgroup ceiling, not a node admission check.
+/// reserve a bounded host-only margin for the runtime, page tables, slab, device
+/// queues and in-flight I/O without enlarging guest RAM: 256 MiB, or 1/32 of
+/// guest RAM for large guests. Once guest RAM is fully faulted (unswappable) only
+/// this margin remains; the node opens the guest disk with direct I/O so host
+/// page cache is not charged here. This is a per-guest cgroup ceiling, not a
+/// node admission check.
 pub(super) fn host_memory_bytes(resources: &crate::boundary::process::VmLimits) -> u64 {
     let guest = guest_memory_bytes(resources);
-    guest + (256 * MIB).max(guest / 64)
+    guest + (256 * MIB).max(guest / 32)
 }
 
 /// Existing lifecycle verbs plus explicit policy verification and replacement.

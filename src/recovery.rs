@@ -73,7 +73,9 @@ impl Retained {
 }
 
 /// A retained sandbox the current operator profile no longer admits, such as one
-/// whose image left the allowlist in a release. It is retired, not restarted.
+/// whose resources leave the profile. It is retired, not restarted. A release
+/// that only stops admitting its pinned image does not retire it: see
+/// [`Config::retaining`](crate::config::Config::retaining).
 pub struct Retired {
     pub retained: Retained,
     pub reason: String,
@@ -388,7 +390,7 @@ impl Store {
                     "retained under an earlier operator binding"
                 ))
             } else {
-                config.validate_request(&sandbox)
+                config.retaining(&sandbox).validate_request(&sandbox)
             };
             let retained = Retained::new(sandbox, snapshot.runtime_identity, snapshot.generation);
             match admission {

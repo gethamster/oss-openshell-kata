@@ -13,5 +13,6 @@ pub mod lifecycle;
 pub mod spec;
 
 pub mod containerd;
+mod containerd_bundle;
 
 mod observation;
