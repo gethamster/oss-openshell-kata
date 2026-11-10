@@ -73,14 +73,17 @@ pub(super) async fn host_process(
             }
             // Kata acknowledges task startup before Dragonball has necessarily
             // named every vCPU thread. Wait for the admitted count to appear;
-            // transient startup state is not a resource-profile mismatch.
+            // transient startup state is not a resource-profile mismatch. The shim's
+            // other threads come and go meanwhile; one that exits between listing
+            // and reading is skipped, not a failed verification (a vanished
+            // hypervisor still fails the count at the deadline).
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
                 let threads = node
                     .node(&args(&[
                         "sh",
                         "-c",
-                        "cat /proc/$1/task/*/comm",
+                        "for comm in /proc/\"$1\"/task/*/comm; do cat \"$comm\" 2>/dev/null || :; done",
                         "sh",
                         &pid.to_string(),
                     ]))
