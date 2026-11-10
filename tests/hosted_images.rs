@@ -66,6 +66,7 @@ fn hosted_owner_images_use_the_existing_resource_and_policy_ceiling() -> anyhow:
     let config = config(root.path());
     config.validate()?;
     for image in config.admitted_images() {
+        let image = image.as_str();
         let mut request = sandbox(image);
         config.validate_request(&request)?;
         assert_eq!(

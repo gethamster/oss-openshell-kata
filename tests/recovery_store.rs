@@ -25,6 +25,7 @@ fn config(root: &Path) -> Config {
         guest_image: Some(IMAGE.into()),
         guest_network_cidr: Some("10.176.0.0/16".into()),
         additional_guest_images: Vec::new(),
+        additional_guest_images_file: None,
         recovery_dir: Some(root.join("registry")),
         hosted_network_config: None,
         max_sandboxes: None,
@@ -284,6 +285,7 @@ fn native_config(root: &Path) -> anyhow::Result<Config> {
         vm_policy: Some(policy),
         guest_network_cidr: None,
         additional_guest_images: Vec::new(),
+        additional_guest_images_file: None,
         max_sandboxes: Some(4),
         workspace_capacities: Vec::new(),
         ..config(root)
@@ -622,6 +624,7 @@ fn records_the_operator_profile_no_longer_admits_are_retired_but_dropped_images_
     let previous_image = IMAGE.replace("aaaa", "cccc");
     let previous = Config {
         additional_guest_images: vec![previous_image.clone()],
+        additional_guest_images_file: None,
         ..native_config(root.path())?
     };
     let store = Store::for_config(&previous)?;
@@ -638,6 +641,7 @@ fn records_the_operator_profile_no_longer_admits_are_retired_but_dropped_images_
     // The next release drops the previous image from the allowlist.
     let current = Config {
         additional_guest_images: Vec::new(),
+        additional_guest_images_file: None,
         ..previous
     };
     let recovered = Store::for_config(&current)?.load(&current)?;

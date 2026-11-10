@@ -328,6 +328,7 @@ fn operator_image_allowlist_admits_only_pinned_templates_under_one_vm_profile() 
         guest_image: Some(builder.clone()),
         guest_network_cidr: None,
         additional_guest_images: vec![thread.clone(), workspace.clone()],
+        additional_guest_images_file: None,
         hosted_network_config: None,
         recovery_dir: None,
         max_sandboxes: None,
@@ -335,7 +336,10 @@ fn operator_image_allowlist_admits_only_pinned_templates_under_one_vm_profile() 
         resource_shapes: Vec::new(),
         resource_shape: Default::default(),
     };
-    assert_eq!(config.admitted_images(), admitted.to_vec());
+    assert_eq!(
+        config.admitted_images(),
+        admitted.map(String::from).to_vec()
+    );
     assert_eq!(
         config.for_sandbox(&request(&thread)).guest_image.as_deref(),
         Some(thread.as_str())
@@ -389,4 +393,84 @@ fn local_profile_rejects_public_ports() {
     assert!(policy.compile(&native).is_err());
     // Without the field the local profile still refuses `**`.
     assert!(profile().compile(&native).is_err());
+}
+
+#[test]
+fn images_file_widens_admission_and_fails_closed_when_untrusted() -> anyhow::Result<()> {
+    use openshell_kata::{config::Config, proto::openshell::compute::v1 as c};
+    use std::os::unix::fs::PermissionsExt;
+    let builder = format!("registry.example/builder@sha256:{}", "a".repeat(64));
+    let thread = format!("registry.example/thread-minion@sha256:{}", "c".repeat(64));
+    let request = |image: &str| c::DriverSandbox {
+        id: "sandbox-one".into(),
+        spec: Some(c::DriverSandboxSpec {
+            template: Some(c::DriverSandboxTemplate {
+                image: image.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let directory = tempfile::tempdir()?;
+    let file = directory.path().join("kata-guest-images.json");
+    let config = Config {
+        socket: "/tmp/adapter.sock".into(),
+        gateway: "https://127.0.0.1:29670".into(),
+        gateway_ca: "/tmp/ca".into(),
+        lifecycle: "/tmp/lifecycle".into(),
+        lifecycle_arg: Vec::new(),
+        ssh: "/usr/bin/ssh".into(),
+        prototype_policy_mode: false,
+        vm_policy: Some("/etc/vm-policy.json".into()),
+        runtime_profile: openshell_kata::config::RuntimeProfile::Local,
+        guest_image: Some(builder.clone()),
+        guest_network_cidr: None,
+        additional_guest_images: Vec::new(),
+        additional_guest_images_file: Some(file.clone()),
+        hosted_network_config: None,
+        recovery_dir: None,
+        max_sandboxes: None,
+        workspace_capacities: Vec::new(),
+        resource_shapes: Vec::new(),
+        resource_shape: Default::default(),
+    };
+    let rejects = |config: &Config| {
+        config
+            .validate()
+            .is_err_and(|error| error.to_string().contains("additional guest images file"))
+    };
+    let mut relative = config.clone();
+    relative.additional_guest_images_file = Some("images.json".into());
+    assert!(rejects(&relative), "the file path must be absolute");
+    let mut no_default = config.clone();
+    no_default.guest_image = None;
+    assert!(rejects(&no_default), "the file extends a default image");
+
+    // Missing file: only the command-line image is admitted.
+    assert_eq!(config.admitted_images(), vec![builder.clone()]);
+    // A file not owned by root is refused, so its image is not admitted.
+    std::fs::write(&file, serde_json::to_string(&[&thread])?)?;
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644))?;
+    let root = rustix::process::geteuid().is_root();
+    if !root {
+        assert_eq!(config.admitted_images(), vec![builder.clone()]);
+        assert_eq!(
+            config.for_sandbox(&request(&thread)).guest_image.as_deref(),
+            Some(builder.as_str()),
+            "an unlisted image falls back to the default"
+        );
+    } else {
+        assert_eq!(
+            config.admitted_images(),
+            vec![builder.clone(), thread.clone()]
+        );
+        assert_eq!(
+            config.for_sandbox(&request(&thread)).guest_image.as_deref(),
+            Some(thread.as_str())
+        );
+        std::fs::write(&file, "[]")?;
+        assert_eq!(config.admitted_images(), vec![builder]);
+    }
+    Ok(())
 }

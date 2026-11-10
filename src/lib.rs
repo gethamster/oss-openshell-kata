@@ -7,6 +7,7 @@ pub mod download;
 pub mod driver;
 pub mod guard_rpc;
 pub mod guest;
+pub mod guest_image_file;
 pub mod hosted;
 mod hosted_network;
 pub mod inventory;

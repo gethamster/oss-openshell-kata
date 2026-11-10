@@ -13,7 +13,12 @@ network ceiling and the default resource shape, unless a declared resource shape
 below applies. The authenticated sandbox
 template selects only an admitted digest; workload inputs cannot alter the
 allowlist or runtime settings. Lifecycle and proof checks use that selected
-image. A retained sandbox keeps its original image across adapter restarts,
+image. `--additional-guest-images-file /absolute/path.json` names a root-owned
+JSON array of further digest-pinned images, read on every admission, so an
+operator can change that set without restarting the adapter; the file only adds
+to the command-line images, and a missing, symlinked, non-root-owned,
+group/world-writable or invalid file admits none of its images (logged once)
+while command-line images keep working. A retained sandbox keeps its original image across adapter restarts,
 even after a release changes the default or stops admitting that image: a
 dropped image only stops new sandboxes from selecting it, and the retained one
 runs it, never another image, until its owner replaces or deletes it. Recovery

@@ -21,6 +21,7 @@ fn config(root: &std::path::Path) -> Arc<Config> {
         guest_image: None,
         guest_network_cidr: None,
         additional_guest_images: Vec::new(),
+        additional_guest_images_file: None,
         recovery_dir: None,
         hosted_network_config: None,
         max_sandboxes: None,

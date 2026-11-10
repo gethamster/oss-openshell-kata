@@ -58,6 +58,12 @@ Require explicit process restart or a separately implemented atomic reload to
 change it. Canonically encode and hash the validated profile; bind that hash
 into each runtime generation and its enforcement evidence.
 
+The one exception is the set of additional admitted guest images:
+`--additional-guest-images-file` names an absolute, root-owned JSON array of
+digest-pinned images that is re-read and re-validated on every admission. It can
+only add images to the command-line set, never alter the policy or any other
+setting, and an unusable file admits none of its images.
+
 ## Operator policy schema
 
 The version-1 schema uses integer quantities and a single explicit profile:

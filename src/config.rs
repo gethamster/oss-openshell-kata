@@ -70,6 +70,12 @@ pub struct Config {
     /// each under the same enforced runtime profile as the default `--guest-image`.
     #[arg(long = "additional-guest-image")]
     pub additional_guest_images: Vec<String>,
+    /// Absolute path of a root-owned JSON array of further admitted guest images,
+    /// read on every admission so a release that only adds or drops images need not
+    /// restart the driver. It only widens `--additional-guest-image`; an unusable
+    /// file leaves its images unadmitted.
+    #[arg(long)]
+    pub additional_guest_images_file: Option<PathBuf>,
     /// Trusted private Pod network; workload requests cannot select the route.
     #[arg(long)]
     pub guest_network_cidr: Option<String>,
@@ -124,12 +130,23 @@ impl Config {
         }
         Ok(capacities)
     }
-    /// The operator-admitted guest images: the default image first, then any additional ones.
-    pub fn admitted_images(&self) -> Vec<&str> {
+    /// The images listed by `--additional-guest-images-file`, read afresh; none
+    /// when the flag is absent or the file is unusable.
+    fn file_guest_images(&self) -> Vec<String> {
+        self.additional_guest_images_file
+            .as_deref()
+            .map(crate::guest_image_file::load_or_fail_closed)
+            .unwrap_or_default()
+    }
+
+    /// The operator-admitted guest images: the default image first, then the
+    /// command-line additional ones, then those in the images file.
+    pub fn admitted_images(&self) -> Vec<String> {
         self.guest_image
             .iter()
             .chain(self.additional_guest_images.iter())
-            .map(String::as_str)
+            .cloned()
+            .chain(self.file_guest_images())
             .collect()
     }
 
@@ -149,6 +166,8 @@ impl Config {
                 if self
                     .additional_guest_images
                     .iter()
+                    .cloned()
+                    .chain(self.file_guest_images())
                     .any(|admitted| admitted == image) =>
             {
                 Some(image.to_owned())
@@ -181,7 +200,10 @@ impl Config {
             .map(|template| template.image.as_str());
         if let Some(image) = image
             && config.guest_image.is_some()
-            && !config.admitted_images().contains(&image)
+            && !config
+                .admitted_images()
+                .iter()
+                .any(|admitted| admitted == image)
             && crate::hosted::validate_image(image).is_ok()
         {
             config.additional_guest_images.push(image.to_owned());
@@ -208,6 +230,16 @@ impl Config {
             for image in &self.additional_guest_images {
                 crate::hosted::validate_image(image)?;
             }
+        }
+        if let Some(path) = &self.additional_guest_images_file
+            && (!path.is_absolute()
+                || self.guest_image.is_none()
+                || self.prototype_policy_mode
+                || (self.runtime_profile == RuntimeProfile::Local && self.vm_policy.is_none()))
+        {
+            bail!(
+                "an additional guest images file requires an absolute path, an enforced runtime profile and a default guest image"
+            );
         }
         if let Some(path) = &self.vm_policy {
             if !path.is_absolute()
@@ -317,7 +349,11 @@ impl Config {
                     crate::admission::compile_request_for_images(
                         sandbox,
                         &policy,
-                        &self.admitted_images(),
+                        &self
+                            .admitted_images()
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>(),
                     )
                     .map(|_| ())
                 } else {

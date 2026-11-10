@@ -382,6 +382,7 @@ async fn native_recovery_stops_before_inventory_and_requires_new_authenticated_s
         vm_policy: Some(path),
         guest_network_cidr: None,
         additional_guest_images: Vec::new(),
+        additional_guest_images_file: None,
         recovery_dir: Some(root.join("native-registry")),
         max_sandboxes: Some(4),
         workspace_capacities: Vec::new(),
@@ -503,6 +504,7 @@ async fn recovery_retires_sandboxes_the_new_operator_profile_no_longer_admits() 
         vm_policy: Some(path),
         guest_network_cidr: None,
         additional_guest_images: vec![retired_image.clone()],
+        additional_guest_images_file: None,
         recovery_dir: Some(root.join("native-registry")),
         max_sandboxes: Some(4),
         workspace_capacities: Vec::new(),
@@ -551,6 +553,7 @@ async fn recovery_retires_sandboxes_the_new_operator_profile_no_longer_admits() 
     // resources leave the operator profile.
     let config = Arc::new(Config {
         additional_guest_images: Vec::new(),
+        additional_guest_images_file: None,
         ..previous
     });
     let log = root.join("lifecycle.log");

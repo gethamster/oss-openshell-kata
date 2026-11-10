@@ -157,8 +157,10 @@ certificates and iproute2, makes uid 1000 the `sandbox` user with home
 `/sandbox` and no password (guest SSH stays key-only) (renaming an existing uid 1000 account, such as
 Ubuntu's `ubuntu`), and adds `guest-init.sh`, `sshd_config` and a static
 `kata-workspace` built from this tree. Build it from the repository root with a
-digest-pinned base, then pin the result with `--guest-image` or
-`--additional-guest-image`:
+digest-pinned base, then pin the result with `--guest-image`,
+`--additional-guest-image` or an entry in the root-owned
+`--additional-guest-images-file` (re-read on every admission, so changing it needs
+no adapter restart):
 
 ```sh
 docker build -f runtime/Dockerfile.layer \
@@ -243,7 +245,7 @@ reserving all retained addresses before the adapter begins serving new requests.
 It preserves the original disk and expiration deadline.
 
 A retained sandbox the current operator profile no longer admits, for example
-because a release dropped its image from `--additional-guest-image` or changed
+because a release dropped its image from `--additional-guest-image` (or the images file) or changed
 the VM resources, is retired at recovery instead of failing the adapter. It is
 deleted like an explicit delete (guest, network fence, snapshot and recovery
 record), logged as `retiring retained sandbox the operator profile no longer

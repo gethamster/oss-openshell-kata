@@ -153,7 +153,11 @@ impl Driver {
             return admission::compile_request_for_images(
                 sandbox,
                 policy,
-                &config.admitted_images(),
+                &config
+                    .admitted_images()
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
             )
             .map(Some);
         }
