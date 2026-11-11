@@ -615,6 +615,7 @@ fn frozen_holder(record: &Record) -> Result<bool> {
 #[cfg(target_os = "linux")]
 fn export_processes(workspace: &Workspace) -> Result<Vec<ExportProcess>> {
     let mut allowed = ancestors(rustix::process::getpid())?;
+    let mut holders = 0usize;
     for entry in process_directory(workspace)?.entries()? {
         let name = entry?.file_name();
         let Some(id) = name
@@ -624,6 +625,8 @@ fn export_processes(workspace: &Workspace) -> Result<Vec<ExportProcess>> {
             continue;
         };
         validate_id(id)?;
+        holders += 1;
+        ensure!(holders <= 4096, "workspace holder limit exceeded");
         if let Some(record) = read_record(workspace, &format!("{id}.hold"))?
             && frozen_holder(&record)?
         {
@@ -632,7 +635,6 @@ fn export_processes(workspace: &Workspace) -> Result<Vec<ExportProcess>> {
                 start: record.start,
                 must_be_stopped: true,
             });
-            ensure!(allowed.len() <= 4096, "workspace holder limit exceeded");
         }
     }
     Ok(allowed)
