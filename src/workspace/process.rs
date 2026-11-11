@@ -140,9 +140,8 @@ pub fn kill(workspace: &Workspace, id: &str) -> Result<()> {
             observed.group == record.pid && observed.session == record.pid,
             "workspace process session changed"
         );
-        // Cross-process exe/cmdline access is deliberately restricted by the
-        // normal runtime. No PID is signalled here: the UUID-bound controller
-        // validates this exact record against its own retained identity.
+        // No PID is signalled here: the UUID-bound controller validates this
+        // exact record against its own retained identity.
         replace_record(workspace, &format!("{id}.cancel"), &record)?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
         loop {
@@ -528,11 +527,10 @@ pub async fn quiesce(workspace: &Workspace) -> Result<()> {
             Ok(active)
         })?;
         if !active {
-            stop_holders(workspace).await?;
             match reconcile_quiescent(workspace) {
                 Ok(()) => return Ok(()),
-                // An owner shell can enter hold just after its command drains.
-                // Reconcile that late holder; never exempt an unknown process.
+                // An owner shell can enter its read-only hold just after the
+                // command drains. Recheck its live identity before exporting.
                 Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
                 Err(_) => {}
             }
@@ -586,59 +584,101 @@ fn ancestors(mut pid: rustix::process::Pid) -> Result<Vec<Ancestor>> {
     Ok(result)
 }
 
-/// Holders are stopped through their own identity-bound requests. No live
-/// process is exempted based on a writable workspace record.
-async fn stop_holders(workspace: &Workspace) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        let directory = process_directory(workspace)?;
-        let mut holders = Vec::new();
-        for entry in directory.entries()? {
-            let name = entry?.file_name();
-            let Some(id) = name
-                .to_str()
-                .and_then(|name| name.strip_suffix(".hold.json"))
-            else {
-                continue;
-            };
-            validate_id(id)?;
-            let Some(record) = read_record(workspace, &format!("{id}.hold"))? else {
-                continue;
-            };
-            ensure!(record.version == 1, "unsupported holder identity");
-            replace_record(workspace, &format!("{id}.hold-exit"), &record)?;
-            holders.push(record);
-            ensure!(holders.len() <= 4096, "workspace holder limit exceeded");
+/// A holder is read-only only while the same executable and exact invocation
+/// remain live. Writable workspace records cannot grant an exemption themselves.
+#[cfg(target_os = "linux")]
+fn verified_holder(workspace: &Workspace, id: &str, record: &Record) -> Result<bool> {
+    use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+    ensure!(record.version == 1, "unsupported holder identity");
+    let pid = i32::try_from(record.pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .context("invalid holder PID")?;
+    let before = match identity(pid) {
+        Ok(value) => value,
+        Err(error) if is_missing(&error) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if before.state == "Z" {
+        return Ok(false);
+    }
+    ensure!(
+        before.start == record.start,
+        "workspace holder identity changed"
+    );
+    let own = std::fs::metadata("/proc/self/exe")?;
+    let executable_path = format!("/proc/{}/exe", record.pid);
+    let executable = std::fs::metadata(&executable_path)?;
+    ensure!(
+        executable.dev() == own.dev() && executable.ino() == own.ino(),
+        "workspace holder executable changed"
+    );
+    let mut bytes = Vec::new();
+    std::fs::File::open(format!("/proc/{}/cmdline", record.pid))?
+        .take(MAX_COMMAND_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= MAX_COMMAND_BYTES,
+        "holder command exceeds limit"
+    );
+    let Some(command) = bytes.strip_suffix(&[0]) else {
+        return Ok(false);
+    };
+    let args = command.split(|byte| *byte == 0).collect::<Vec<_>>();
+    let root = workspace.root.as_os_str().as_bytes();
+    let matches = match args.as_slice() {
+        [_, operation, argument] => {
+            root == b"/sandbox" && *operation == b"hold" && *argument == id.as_bytes()
         }
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            let mut live = false;
-            for record in &holders {
-                let pid = i32::try_from(record.pid)
-                    .ok()
-                    .and_then(rustix::process::Pid::from_raw)
-                    .context("invalid holder PID")?;
-                match identity(pid) {
-                    Ok(current) => live |= current.start == record.start && current.state != "Z",
-                    Err(error) if is_missing(&error) => {}
-                    Err(error) => return Err(error.context("verify holder exit")),
-                }
-            }
-            if !live {
-                return Ok(());
-            }
-            ensure!(
-                tokio::time::Instant::now() < deadline,
-                "workspace holders did not exit"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        [_, flag, operation, argument] => {
+            flag.strip_prefix(b"--root=") == Some(root)
+                && *operation == b"hold"
+                && *argument == id.as_bytes()
+        }
+        [_, flag, root_argument, operation, argument] => {
+            *flag == b"--root"
+                && *root_argument == root
+                && *operation == b"hold"
+                && *argument == id.as_bytes()
+        }
+        _ => false,
+    };
+    ensure!(matches, "workspace holder invocation changed");
+    let after = identity(pid)?;
+    let executable = std::fs::metadata(executable_path)?;
+    ensure!(
+        after.start == record.start
+            && after.state != "Z"
+            && executable.dev() == own.dev()
+            && executable.ino() == own.ino(),
+        "workspace holder identity changed during verification"
+    );
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn export_processes(workspace: &Workspace) -> Result<Vec<Ancestor>> {
+    let mut allowed = ancestors(rustix::process::getpid())?;
+    for entry in process_directory(workspace)?.entries()? {
+        let name = entry?.file_name();
+        let Some(id) = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".hold.json"))
+        else {
+            continue;
+        };
+        validate_id(id)?;
+        if let Some(record) = read_record(workspace, &format!("{id}.hold"))?
+            && verified_holder(workspace, id, &record)?
+        {
+            allowed.push(Ancestor {
+                pid: record.pid,
+                start: record.start,
+            });
+            ensure!(allowed.len() <= 4096, "workspace holder limit exceeded");
         }
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = workspace;
-        anyhow::bail!("workspace quiescence requires Linux")
-    }
+    Ok(allowed)
 }
 
 /// Recover a failed drain only after a fresh scan proves the whole process
@@ -648,7 +688,7 @@ fn reconcile_quiescent(workspace: &Workspace) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         ensure!(frozen(workspace)?, "workspace is not frozen");
-        let allowed = ancestors(rustix::process::getpid())?;
+        let allowed = export_processes(workspace)?;
         require_quiescent(&allowed)?;
         let directory = process_directory(workspace)?;
         let _lock = lock_records(&directory)?;
@@ -690,7 +730,6 @@ pub(super) fn verify_quiescent(_workspace: &Workspace) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         let workspace = _workspace;
-        let allowed = ancestors(rustix::process::getpid())?;
         for entry in process_directory(workspace)?.entries()? {
             let name = entry?.file_name();
             ensure!(
@@ -700,6 +739,7 @@ pub(super) fn verify_quiescent(_workspace: &Workspace) -> Result<()> {
                 "workspace descendant drain remains unverified"
             );
         }
+        let allowed = export_processes(workspace)?;
         require_quiescent(&allowed)?;
     }
     Ok(())

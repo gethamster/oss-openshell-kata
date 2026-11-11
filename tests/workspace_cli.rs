@@ -458,7 +458,141 @@ mod linux {
         );
         assert!(!output.status.success());
         assert!(output.stdout.is_empty(), "no archive before quiescence");
-        assert!(String::from_utf8_lossy(&output.stderr).contains("holders did not exit"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("holder executable changed"));
+    }
+
+    #[test]
+    fn holder_identity_uuid_and_workspace_root_are_verified_before_export() {
+        for changed in ["start", "uuid", "root"] {
+            let source = tempfile::tempdir().expect("source");
+            let other = tempfile::tempdir().expect("other workspace");
+            let actual = if changed == "root" {
+                other.path()
+            } else {
+                source.path()
+            };
+            let id = Uuid::new_v4().to_string();
+            let mut child = helper(actual).args(["hold", &id]).spawn().expect("holder");
+            let record_path = actual.join(format!(".system-processes/{id}.hold.json"));
+            wait_for(&record_path);
+            let original = fs::read(&record_path).expect("holder identity");
+            let mut record: serde_json::Value = serde_json::from_slice(&original).expect("JSON");
+            if changed == "start" {
+                record["start"] = (record["start"].as_u64().expect("start") + 1).into();
+            }
+            let claimed = if changed == "uuid" {
+                Uuid::new_v4().to_string()
+            } else {
+                id.clone()
+            };
+            let directory = source.path().join(".system-processes");
+            fs::create_dir_all(&directory).expect("record directory");
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+                .expect("private directory");
+            fs::write(
+                directory.join(format!("{claimed}.hold.json")),
+                serde_json::to_vec(&record).expect("encode record"),
+            )
+            .expect("claimed identity");
+            let output = helper(source.path())
+                .arg("quiesce-export")
+                .output()
+                .expect("export");
+            assert!(
+                child.try_wait().expect("holder status").is_none(),
+                "{changed}"
+            );
+            fs::write(&record_path, &original).expect("restore owned record");
+            fs::write(
+                actual.join(format!(".system-processes/{id}.hold-exit.json")),
+                &original,
+            )
+            .expect("stop owned holder");
+            assert!(child.wait().expect("holder exit").success());
+            assert!(!output.status.success(), "{changed}");
+            assert!(output.stdout.is_empty(), "{changed}");
+            let expected = if changed == "start" {
+                "holder identity changed"
+            } else {
+                "holder invocation changed"
+            };
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(expected),
+                "{changed}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    /// Run inside an isolated PID namespace, as in the normal gateway guest.
+    #[test]
+    #[ignore = "requires isolated PID namespace; run in a test container or normal gateway guest"]
+    fn quiescent_export_keeps_the_canonical_holder_alive() {
+        let root = tempfile::tempdir().expect("workspace");
+        fs::write(root.path().join("retained"), b"workspace bytes").expect("content");
+        let id = Uuid::new_v4().to_string();
+        let mut child = Command::new("sh")
+            .args(["-c", "\"$1\" --root \"$2\" run \"$3\" '[\"true\"]'; exec \"$1\" --root \"$2\" hold \"$3\"", "sh"])
+            .arg(env!("CARGO_BIN_EXE_kata-workspace"))
+            .arg(root.path())
+            .arg(&id)
+            .spawn()
+            .expect("canonical workload wrapper");
+        let record_path = root
+            .path()
+            .join(format!(".system-processes/{id}.hold.json"));
+        wait_for(&record_path);
+        let record = fs::read(&record_path).expect("holder identity");
+        let writer_id = Uuid::new_v4().to_string();
+        let marker = root.path().join("writer-ready");
+        let writer = spawn(
+            root.path(),
+            &writer_id,
+            &[
+                "sh",
+                "-c",
+                "touch \"$1\"; while :; do sleep 1; done",
+                "sh",
+                marker.to_str().expect("marker path"),
+            ],
+        );
+        wait_for(&marker);
+        let first = helper(root.path())
+            .arg("quiesce-export")
+            .output()
+            .expect("first export");
+        let stopped_writer = writer.wait_with_output().expect("managed writer stopped");
+        assert_eq!(stopped_writer.status.code(), Some(137));
+        let alive = child.try_wait().expect("holder status").is_none();
+        let second = helper(root.path())
+            .arg("export")
+            .output()
+            .expect("repeated export");
+        fs::write(
+            root.path()
+                .join(format!(".system-processes/{id}.hold-exit.json")),
+            record,
+        )
+        .expect("stop owned holder");
+        assert!(child.wait().expect("holder exit").success());
+        assert!(alive, "quiescence must preserve the sandbox main holder");
+        assert!(
+            first.status.success(),
+            "{}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+        assert!(
+            second.status.success(),
+            "{}",
+            String::from_utf8_lossy(&second.stderr)
+        );
+        assert!(!first.stdout.is_empty());
+        assert_eq!(first.stdout, second.stdout);
+        assert_eq!(
+            fs::read(root.path().join("retained")).expect("retained content"),
+            b"workspace bytes"
+        );
     }
 
     #[test]
