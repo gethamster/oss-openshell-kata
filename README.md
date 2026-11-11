@@ -90,14 +90,16 @@ the failure marker is retained under a
 reconciled name. Thawing or reconnecting alone never clears the failure.
 
 `hold <uuid>` keeps an interrupted owner workload available for file transfer.
-`quiesce` blocks new helper commands, stops managed descendants and holders,
-and refuses transfer preparation while any untracked live process remains.
-A writable holder record never exempts a live process from this check.
+`quiesce` blocks new helper commands, stops managed descendants,
+and requests each holder to stop itself while keeping the sandbox main alive.
+Export verifies the holder's retained PID/start identity and kernel stopped state;
+a writable holder record cannot exempt a running process.
 `quiesce-export` performs quiescence and streams the archive within one already
-admitted command; use it when holder exit completes the sandbox's main process
-and prevents admitting another command. The source files remain intact on
-failure. Recovery must restore an authorized running transport before using
-`thaw`; do not recreate or discard the authoritative source to conceal failure.
+admitted command. The source files remain intact on failure. Recovery must restore
+an authorized running transport before using `thaw`; do not recreate or discard
+the authoritative source to conceal failure. `thaw` permits new helper commands
+and leaves stopped holders in place until normal sandbox stop/restart or deletion.
+It never signals a PID selected by a workspace record.
 
 `export` and `import` stream deterministic USTAR workspace archives for runtime
 moves. They retain hidden files and executable permissions, allow only relative

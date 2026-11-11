@@ -140,9 +140,8 @@ pub fn kill(workspace: &Workspace, id: &str) -> Result<()> {
             observed.group == record.pid && observed.session == record.pid,
             "workspace process session changed"
         );
-        // Cross-process exe/cmdline access is deliberately restricted by the
-        // normal runtime. No PID is signalled here: the UUID-bound controller
-        // validates this exact record against its own retained identity.
+        // No PID is signalled here: the UUID-bound controller validates this
+        // exact record against its own retained identity.
         replace_record(workspace, &format!("{id}.cancel"), &record)?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
         loop {
@@ -253,7 +252,15 @@ fn stale_record(workspace: &Workspace, id: &str) -> Result<bool> {
     let Some(record) = read_record(workspace, id)? else {
         return Ok(false);
     };
-    let command = id.strip_suffix(".hold").unwrap_or(id);
+    if id.ends_with(".hold") {
+        ensure!(
+            read_record(workspace, &format!("{id}-exit"))?.is_none(),
+            "workspace holder has a retained stop request"
+        );
+        require_stale(&record)?;
+        return Ok(true);
+    }
+    let command = id;
     let directory = process_directory(workspace)?;
     for suffix in [
         "capability.json",
@@ -267,12 +274,6 @@ fn stale_record(workspace: &Workspace, id: &str) -> Result<bool> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-    }
-    if id.ends_with(".hold") {
-        ensure!(
-            read_record(workspace, &format!("{id}-exit"))?.is_none(),
-            "workspace holder has a retained stop request"
-        );
     }
     require_stale(&record)?;
     Ok(true)
@@ -528,11 +529,10 @@ pub async fn quiesce(workspace: &Workspace) -> Result<()> {
             Ok(active)
         })?;
         if !active {
-            stop_holders(workspace).await?;
             match reconcile_quiescent(workspace) {
                 Ok(()) => return Ok(()),
-                // An owner shell can enter hold just after its command drains.
-                // Reconcile that late holder; never exempt an unknown process.
+                // An owner shell can enter hold just after the command drains.
+                // Wait until that exact holder has stopped itself.
                 Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
                 Err(_) => {}
             }
@@ -556,13 +556,14 @@ pub fn thaw(workspace: &Workspace) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Deserialize, Serialize)]
-struct Ancestor {
+struct ExportProcess {
     pid: u32,
     start: u64,
+    must_be_stopped: bool,
 }
 
 #[cfg(target_os = "linux")]
-fn ancestors(mut pid: rustix::process::Pid) -> Result<Vec<Ancestor>> {
+fn ancestors(mut pid: rustix::process::Pid) -> Result<Vec<ExportProcess>> {
     let mut result = Vec::new();
     loop {
         let process = identity(pid)?;
@@ -574,9 +575,10 @@ fn ancestors(mut pid: rustix::process::Pid) -> Result<Vec<Ancestor>> {
         };
         pid = parent;
         let process = identity(pid)?;
-        result.push(Ancestor {
+        result.push(ExportProcess {
             pid: pid.as_raw_nonzero().get() as u32,
             start: process.start,
+            must_be_stopped: false,
         });
         ensure!(
             result.len() <= 128,
@@ -586,59 +588,56 @@ fn ancestors(mut pid: rustix::process::Pid) -> Result<Vec<Ancestor>> {
     Ok(result)
 }
 
-/// Holders are stopped through their own identity-bound requests. No live
-/// process is exempted based on a writable workspace record.
-async fn stop_holders(workspace: &Workspace) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        let directory = process_directory(workspace)?;
-        let mut holders = Vec::new();
-        for entry in directory.entries()? {
-            let name = entry?.file_name();
-            let Some(id) = name
-                .to_str()
-                .and_then(|name| name.strip_suffix(".hold.json"))
-            else {
-                continue;
-            };
-            validate_id(id)?;
-            let Some(record) = read_record(workspace, &format!("{id}.hold"))? else {
-                continue;
-            };
-            ensure!(record.version == 1, "unsupported holder identity");
-            replace_record(workspace, &format!("{id}.hold-exit"), &record)?;
-            holders.push(record);
-            ensure!(holders.len() <= 4096, "workspace holder limit exceeded");
-        }
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            let mut live = false;
-            for record in &holders {
-                let pid = i32::try_from(record.pid)
-                    .ok()
-                    .and_then(rustix::process::Pid::from_raw)
-                    .context("invalid holder PID")?;
-                match identity(pid) {
-                    Ok(current) => live |= current.start == record.start && current.state != "Z",
-                    Err(error) if is_missing(&error) => {}
-                    Err(error) => return Err(error.context("verify holder exit")),
-                }
-            }
-            if !live {
-                return Ok(());
-            }
-            ensure!(
-                tokio::time::Instant::now() < deadline,
-                "workspace holders did not exit"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+/// A claimed holder is quiescent only while the kernel reports its exact
+/// process stopped. A writable record cannot exempt a running writer.
+#[cfg(target_os = "linux")]
+fn frozen_holder(record: &Record) -> Result<bool> {
+    ensure!(record.version == 1, "unsupported holder identity");
+    let pid = i32::try_from(record.pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .context("invalid holder PID")?;
+    let current = match identity(pid) {
+        Ok(value) => value,
+        Err(error) if is_missing(&error) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if current.state == "Z" {
+        return Ok(false);
+    }
+    ensure!(
+        current.start == record.start,
+        "workspace holder identity changed"
+    );
+    Ok(current.state == "T")
+}
+
+#[cfg(target_os = "linux")]
+fn export_processes(workspace: &Workspace) -> Result<Vec<ExportProcess>> {
+    let mut allowed = ancestors(rustix::process::getpid())?;
+    let mut holders = 0usize;
+    for entry in process_directory(workspace)?.entries()? {
+        let name = entry?.file_name();
+        let Some(id) = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".hold.json"))
+        else {
+            continue;
+        };
+        validate_id(id)?;
+        holders += 1;
+        ensure!(holders <= 4096, "workspace holder limit exceeded");
+        if let Some(record) = read_record(workspace, &format!("{id}.hold"))?
+            && frozen_holder(&record)?
+        {
+            allowed.push(ExportProcess {
+                pid: record.pid,
+                start: record.start,
+                must_be_stopped: true,
+            });
         }
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = workspace;
-        anyhow::bail!("workspace quiescence requires Linux")
-    }
+    Ok(allowed)
 }
 
 /// Recover a failed drain only after a fresh scan proves the whole process
@@ -648,7 +647,7 @@ fn reconcile_quiescent(workspace: &Workspace) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         ensure!(frozen(workspace)?, "workspace is not frozen");
-        let allowed = ancestors(rustix::process::getpid())?;
+        let allowed = export_processes(workspace)?;
         require_quiescent(&allowed)?;
         let directory = process_directory(workspace)?;
         let _lock = lock_records(&directory)?;
@@ -690,7 +689,6 @@ pub(super) fn verify_quiescent(_workspace: &Workspace) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         let workspace = _workspace;
-        let allowed = ancestors(rustix::process::getpid())?;
         for entry in process_directory(workspace)?.entries()? {
             let name = entry?.file_name();
             ensure!(
@@ -700,6 +698,7 @@ pub(super) fn verify_quiescent(_workspace: &Workspace) -> Result<()> {
                 "workspace descendant drain remains unverified"
             );
         }
+        let allowed = export_processes(workspace)?;
         require_quiescent(&allowed)?;
     }
     Ok(())
@@ -713,7 +712,7 @@ pub(super) fn verify_frozen_export(workspace: &Workspace) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn require_quiescent(allowed: &[Ancestor]) -> Result<()> {
+fn require_quiescent(allowed: &[ExportProcess]) -> Result<()> {
     let own = rustix::process::getpid().as_raw_nonzero().get() as u32;
     for entry in std::fs::read_dir("/proc")? {
         let entry = entry?;
@@ -734,17 +733,22 @@ fn require_quiescent(allowed: &[Ancestor]) -> Result<()> {
             Err(error) if is_missing(&error) => continue,
             Err(error) => return Err(error),
         };
-        if current.state == "Z"
-            || allowed
-                .iter()
-                .any(|allowed| allowed.pid == raw && allowed.start == current.start)
-        {
-            continue;
-        }
-        anyhow::bail!(
-            "workspace still has an untracked live process ({raw}); refusing a non-quiescent export"
-        );
+        require_export_process(allowed, raw, &current)?;
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn require_export_process(allowed: &[ExportProcess], pid: u32, current: &Identity) -> Result<()> {
+    ensure!(
+        current.state == "Z"
+            || allowed.iter().any(|allowed| {
+                allowed.pid == pid
+                    && allowed.start == current.start
+                    && (!allowed.must_be_stopped || current.state == "T")
+            }),
+        "workspace still has an untracked live process ({pid}); refusing a non-quiescent export"
+    );
     Ok(())
 }
 
@@ -762,6 +766,15 @@ pub async fn hold(_workspace: &Workspace, id: &str) -> Result<()> {
         };
         publish_record(workspace, &format!("{id}.hold"), &record)?;
         loop {
+            if frozen(workspace)? {
+                ensure!(
+                    read_record(workspace, &format!("{id}.hold"))?.as_ref() == Some(&record),
+                    "workspace holder identity was replaced"
+                );
+                // Stop only this process. The exporter checks the kernel's stopped
+                // state; forged records never select a process to signal.
+                rustix::process::kill_process(pid, rustix::process::Signal::STOP)?;
+            }
             if let Some(request) = read_record(workspace, &format!("{id}.hold-exit"))? {
                 ensure!(request == record, "workspace holder stop identity changed");
                 ensure!(
@@ -810,6 +823,132 @@ mod tests {
         thaw(&workspace).expect("thaw does not erase failed drain");
         let error = verify_quiescent(&workspace).expect_err("failed drain is not quiescent");
         assert!(error.to_string().contains("drain remains unverified"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_holder_record_needs_a_kernel_stopped_process() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("owned process");
+        let pid = rustix::process::Pid::from_raw(child.id() as i32).expect("PID");
+        let record = Record {
+            version: 1,
+            pid: child.id(),
+            start: identity(pid).expect("identity").start,
+        };
+        let running = frozen_holder(&record).expect("running observation");
+        rustix::process::kill_process(pid, rustix::process::Signal::STOP)
+            .expect("stop owned process");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while identity(pid).expect("identity").state != "T" && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let stopped = frozen_holder(&record).expect("stopped observation");
+        let forged = Record {
+            start: record.start + 1,
+            ..record
+        };
+        let rejected = frozen_holder(&forged).is_err();
+        child.kill().expect("kill owned process");
+        child.wait().expect("reap owned process");
+        assert!(!running);
+        assert!(stopped);
+        assert!(rejected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resumed_holder_is_rejected_by_the_export_scan() {
+        let root = tempfile::tempdir().expect("workspace");
+        let workspace = Workspace::open(root.path()).expect("workspace");
+        let id = Uuid::new_v4().to_string();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("owned process");
+        let pid = rustix::process::Pid::from_raw(child.id() as i32).expect("PID");
+        let record = Record {
+            version: 1,
+            pid: child.id(),
+            start: identity(pid).expect("identity").start,
+        };
+        publish_record(&workspace, &format!("{id}.hold"), &record).expect("holder record");
+        rustix::process::kill_process(pid, rustix::process::Signal::STOP)
+            .expect("stop owned process");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while identity(pid).expect("identity").state != "T" && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let allowed = export_processes(&workspace).expect("stopped process snapshot");
+        rustix::process::kill_process(pid, rustix::process::Signal::CONT)
+            .expect("resume owned test process");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while identity(pid).expect("identity").state == "T" && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let current = identity(pid).expect("resumed identity");
+        let rejected = require_export_process(&allowed, record.pid, &current).is_err();
+        let scan_rejected = require_quiescent(&allowed).is_err();
+        child.kill().expect("kill owned process");
+        child.wait().expect("reap owned process");
+        assert!(
+            rejected,
+            "a stopped snapshot must not exempt a running holder"
+        );
+        assert!(scan_rejected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stale_holder_replacement_preserves_prior_command_evidence() {
+        let root = tempfile::tempdir().expect("workspace");
+        let workspace = Workspace::open(root.path()).expect("workspace");
+        let id = Uuid::new_v4().to_string();
+        let pid = rustix::process::getpid();
+        let old = Record {
+            version: 1,
+            pid: pid.as_raw_nonzero().get() as u32,
+            start: 0,
+        };
+        publish_record(&workspace, &format!("{id}.hold"), &old).expect("old holder");
+        let directory = process_directory(&workspace).expect("control directory");
+        for suffix in [
+            "cancelled",
+            "cancel.json",
+            "cancel-ack.json",
+            "drain-failed",
+            "capability.json",
+        ] {
+            directory
+                .write(format!("{id}.{suffix}"), b"retained command evidence")
+                .expect("prior evidence");
+        }
+        let current = Record {
+            start: identity(pid).expect("identity").start,
+            ..old
+        };
+        publish_record(&workspace, &format!("{id}.hold"), &current)
+            .expect("replace proven-stale holder");
+        assert!(publish_record(&workspace, &format!("{id}.hold"), &current).is_err());
+        for suffix in [
+            "cancelled",
+            "cancel.json",
+            "cancel-ack.json",
+            "drain-failed",
+            "capability.json",
+        ] {
+            assert_eq!(
+                directory
+                    .read(format!("{id}.{suffix}"))
+                    .expect("retained evidence"),
+                b"retained command evidence"
+            );
+        }
     }
 
     #[test]

@@ -458,7 +458,130 @@ mod linux {
         );
         assert!(!output.status.success());
         assert!(output.stdout.is_empty(), "no archive before quiescence");
-        assert!(String::from_utf8_lossy(&output.stderr).contains("holders did not exit"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("untracked live process"));
+    }
+
+    /// Run inside an isolated PID namespace, as in the normal gateway guest.
+    #[test]
+    #[ignore = "requires isolated PID namespace; run in a test container or normal gateway guest"]
+    fn quiescent_export_keeps_the_canonical_holder_alive() {
+        let root = tempfile::tempdir().expect("workspace");
+        fs::write(root.path().join("retained"), b"workspace bytes").expect("content");
+        let id = Uuid::new_v4().to_string();
+        let mut child = Command::new("sh")
+            .args(["-c", "\"$1\" --root \"$2\" run \"$3\" '[\"true\"]'; exec \"$1\" --root \"$2\" hold \"$3\"", "sh"])
+            .arg(env!("CARGO_BIN_EXE_kata-workspace"))
+            .arg(root.path())
+            .arg(&id)
+            .spawn()
+            .expect("canonical workload wrapper");
+        let record_path = root
+            .path()
+            .join(format!(".system-processes/{id}.hold.json"));
+        wait_for(&record_path);
+
+        let writer_id = Uuid::new_v4().to_string();
+        let marker = root.path().join("writer-ready");
+        let writer = spawn(
+            root.path(),
+            &writer_id,
+            &[
+                "sh",
+                "-c",
+                "touch \"$1\"; while :; do sleep 1; done",
+                "sh",
+                marker.to_str().expect("marker path"),
+            ],
+        );
+        wait_for(&marker);
+        let first = helper(root.path())
+            .arg("quiesce-export")
+            .output()
+            .expect("first export");
+        let stopped_writer = writer.wait_with_output().expect("managed writer stopped");
+        assert_eq!(stopped_writer.status.code(), Some(137));
+        let alive = child.try_wait().expect("holder status").is_none();
+        let second = helper(root.path())
+            .arg("export")
+            .output()
+            .expect("repeated export");
+        let state = fs::read_to_string(format!("/proc/{}/stat", child.id())).expect("holder state");
+        assert_eq!(
+            state
+                .rsplit_once(')')
+                .expect("stat")
+                .1
+                .split_whitespace()
+                .next(),
+            Some("T")
+        );
+        assert!(
+            helper(root.path())
+                .arg("thaw")
+                .status()
+                .expect("thaw")
+                .success()
+        );
+        let after = fs::read_to_string(format!("/proc/{}/stat", child.id()))
+            .expect("holder state after thaw");
+        assert_eq!(
+            after
+                .rsplit_once(')')
+                .expect("stat")
+                .1
+                .split_whitespace()
+                .next(),
+            Some("T")
+        );
+        child.kill().expect("stop owned frozen holder");
+        child.wait().expect("reap holder");
+        let mut restarted = helper(root.path())
+            .args(["hold", &id])
+            .spawn()
+            .expect("restart holder");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let current: serde_json::Value =
+                serde_json::from_slice(&fs::read(&record_path).expect("holder record"))
+                    .expect("record JSON");
+            if current["pid"].as_u64() == Some(u64::from(restarted.id())) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "stale holder record was not replaced"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let resumed = helper(root.path())
+            .arg("quiesce-export")
+            .output()
+            .expect("export after restart");
+        restarted.kill().expect("stop restarted holder");
+        restarted.wait().expect("reap restarted holder");
+        assert!(
+            resumed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        assert_eq!(first.stdout, resumed.stdout);
+        assert!(alive, "quiescence must preserve the sandbox main holder");
+        assert!(
+            first.status.success(),
+            "{}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+        assert!(
+            second.status.success(),
+            "{}",
+            String::from_utf8_lossy(&second.stderr)
+        );
+        assert!(!first.stdout.is_empty());
+        assert_eq!(first.stdout, second.stdout);
+        assert_eq!(
+            fs::read(root.path().join("retained")).expect("retained content"),
+            b"workspace bytes"
+        );
     }
 
     #[test]
