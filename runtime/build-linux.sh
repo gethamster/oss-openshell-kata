@@ -13,7 +13,7 @@ parallel=${CARGO_BUILD_JOBS:-32}
 [[ "$parallel" =~ ^[1-9][0-9]{0,2}$ && "$parallel" -le 128 ]] || exit 2
 cargo build --release --locked -j "$parallel" --bin openshell-kata --bin kata-runtime --bin kata-network --bin kata-operator
 CC_x86_64_unknown_linux_musl=musl-gcc CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
-  cargo rustc --release --locked --target x86_64-unknown-linux-musl -j "$parallel" --bin kata-workspace -- -C link-arg=-static
+  cargo build --release --locked --target x86_64-unknown-linux-musl -j "$parallel" --bin kata-workspace
 mkdir -m 0755 "$1"
 for binary in openshell-kata kata-runtime kata-network kata-operator; do install -m 0755 "$CARGO_TARGET_DIR/release/$binary" "$1/$binary"; done
 install -m 0755 "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/kata-workspace" "$1/kata-workspace"
