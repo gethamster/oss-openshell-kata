@@ -458,71 +458,7 @@ mod linux {
         );
         assert!(!output.status.success());
         assert!(output.stdout.is_empty(), "no archive before quiescence");
-        assert!(String::from_utf8_lossy(&output.stderr).contains("holder executable changed"));
-    }
-
-    #[test]
-    fn holder_identity_uuid_and_workspace_root_are_verified_before_export() {
-        for changed in ["start", "uuid", "root"] {
-            let source = tempfile::tempdir().expect("source");
-            let other = tempfile::tempdir().expect("other workspace");
-            let actual = if changed == "root" {
-                other.path()
-            } else {
-                source.path()
-            };
-            let id = Uuid::new_v4().to_string();
-            let mut child = helper(actual).args(["hold", &id]).spawn().expect("holder");
-            let record_path = actual.join(format!(".system-processes/{id}.hold.json"));
-            wait_for(&record_path);
-            let original = fs::read(&record_path).expect("holder identity");
-            let mut record: serde_json::Value = serde_json::from_slice(&original).expect("JSON");
-            if changed == "start" {
-                record["start"] = (record["start"].as_u64().expect("start") + 1).into();
-            }
-            let claimed = if changed == "uuid" {
-                Uuid::new_v4().to_string()
-            } else {
-                id.clone()
-            };
-            let directory = source.path().join(".system-processes");
-            fs::create_dir_all(&directory).expect("record directory");
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-                .expect("private directory");
-            fs::write(
-                directory.join(format!("{claimed}.hold.json")),
-                serde_json::to_vec(&record).expect("encode record"),
-            )
-            .expect("claimed identity");
-            let output = helper(source.path())
-                .arg("quiesce-export")
-                .output()
-                .expect("export");
-            assert!(
-                child.try_wait().expect("holder status").is_none(),
-                "{changed}"
-            );
-            fs::write(&record_path, &original).expect("restore owned record");
-            fs::write(
-                actual.join(format!(".system-processes/{id}.hold-exit.json")),
-                &original,
-            )
-            .expect("stop owned holder");
-            assert!(child.wait().expect("holder exit").success());
-            assert!(!output.status.success(), "{changed}");
-            assert!(output.stdout.is_empty(), "{changed}");
-            let expected = if changed == "start" {
-                "holder identity changed"
-            } else {
-                "holder invocation changed"
-            };
-            assert!(
-                String::from_utf8_lossy(&output.stderr).contains(expected),
-                "{changed}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
+        assert!(String::from_utf8_lossy(&output.stderr).contains("untracked live process"));
     }
 
     /// Run inside an isolated PID namespace, as in the normal gateway guest.
@@ -543,7 +479,7 @@ mod linux {
             .path()
             .join(format!(".system-processes/{id}.hold.json"));
         wait_for(&record_path);
-        let record = fs::read(&record_path).expect("holder identity");
+
         let writer_id = Uuid::new_v4().to_string();
         let marker = root.path().join("writer-ready");
         let writer = spawn(
@@ -569,13 +505,66 @@ mod linux {
             .arg("export")
             .output()
             .expect("repeated export");
-        fs::write(
-            root.path()
-                .join(format!(".system-processes/{id}.hold-exit.json")),
-            record,
-        )
-        .expect("stop owned holder");
-        assert!(child.wait().expect("holder exit").success());
+        let state = fs::read_to_string(format!("/proc/{}/stat", child.id())).expect("holder state");
+        assert_eq!(
+            state
+                .rsplit_once(')')
+                .expect("stat")
+                .1
+                .split_whitespace()
+                .next(),
+            Some("T")
+        );
+        assert!(
+            helper(root.path())
+                .arg("thaw")
+                .status()
+                .expect("thaw")
+                .success()
+        );
+        let after = fs::read_to_string(format!("/proc/{}/stat", child.id()))
+            .expect("holder state after thaw");
+        assert_eq!(
+            after
+                .rsplit_once(')')
+                .expect("stat")
+                .1
+                .split_whitespace()
+                .next(),
+            Some("T")
+        );
+        child.kill().expect("stop owned frozen holder");
+        child.wait().expect("reap holder");
+        let mut restarted = helper(root.path())
+            .args(["hold", &id])
+            .spawn()
+            .expect("restart holder");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let current: serde_json::Value =
+                serde_json::from_slice(&fs::read(&record_path).expect("holder record"))
+                    .expect("record JSON");
+            if current["pid"].as_u64() == Some(u64::from(restarted.id())) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "stale holder record was not replaced"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let resumed = helper(root.path())
+            .arg("quiesce-export")
+            .output()
+            .expect("export after restart");
+        restarted.kill().expect("stop restarted holder");
+        restarted.wait().expect("reap restarted holder");
+        assert!(
+            resumed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        assert_eq!(first.stdout, resumed.stdout);
         assert!(alive, "quiescence must preserve the sandbox main holder");
         assert!(
             first.status.success(),

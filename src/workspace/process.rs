@@ -252,7 +252,15 @@ fn stale_record(workspace: &Workspace, id: &str) -> Result<bool> {
     let Some(record) = read_record(workspace, id)? else {
         return Ok(false);
     };
-    let command = id.strip_suffix(".hold").unwrap_or(id);
+    if id.ends_with(".hold") {
+        ensure!(
+            read_record(workspace, &format!("{id}-exit"))?.is_none(),
+            "workspace holder has a retained stop request"
+        );
+        require_stale(&record)?;
+        return Ok(true);
+    }
+    let command = id;
     let directory = process_directory(workspace)?;
     for suffix in [
         "capability.json",
@@ -266,12 +274,6 @@ fn stale_record(workspace: &Workspace, id: &str) -> Result<bool> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-    }
-    if id.ends_with(".hold") {
-        ensure!(
-            read_record(workspace, &format!("{id}-exit"))?.is_none(),
-            "workspace holder has a retained stop request"
-        );
     }
     require_stale(&record)?;
     Ok(true)
@@ -529,8 +531,8 @@ pub async fn quiesce(workspace: &Workspace) -> Result<()> {
         if !active {
             match reconcile_quiescent(workspace) {
                 Ok(()) => return Ok(()),
-                // An owner shell can enter its read-only hold just after the
-                // command drains. Recheck its live identity before exporting.
+                // An owner shell can enter hold just after the command drains.
+                // Wait until that exact holder has stopped itself.
                 Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
                 Err(_) => {}
             }
@@ -584,76 +586,28 @@ fn ancestors(mut pid: rustix::process::Pid) -> Result<Vec<Ancestor>> {
     Ok(result)
 }
 
-/// A holder is read-only only while the same executable and exact invocation
-/// remain live. Writable workspace records cannot grant an exemption themselves.
+/// A claimed holder is quiescent only while the kernel reports its exact
+/// process stopped. A writable record cannot exempt a running writer.
 #[cfg(target_os = "linux")]
-fn verified_holder(workspace: &Workspace, id: &str, record: &Record) -> Result<bool> {
-    use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+fn frozen_holder(record: &Record) -> Result<bool> {
     ensure!(record.version == 1, "unsupported holder identity");
     let pid = i32::try_from(record.pid)
         .ok()
         .and_then(rustix::process::Pid::from_raw)
         .context("invalid holder PID")?;
-    let before = match identity(pid) {
+    let current = match identity(pid) {
         Ok(value) => value,
         Err(error) if is_missing(&error) => return Ok(false),
         Err(error) => return Err(error),
     };
-    if before.state == "Z" {
+    if current.state == "Z" {
         return Ok(false);
     }
     ensure!(
-        before.start == record.start,
+        current.start == record.start,
         "workspace holder identity changed"
     );
-    let own = std::fs::metadata("/proc/self/exe")?;
-    let executable_path = format!("/proc/{}/exe", record.pid);
-    let executable = std::fs::metadata(&executable_path)?;
-    ensure!(
-        executable.dev() == own.dev() && executable.ino() == own.ino(),
-        "workspace holder executable changed"
-    );
-    let mut bytes = Vec::new();
-    std::fs::File::open(format!("/proc/{}/cmdline", record.pid))?
-        .take(MAX_COMMAND_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() <= MAX_COMMAND_BYTES,
-        "holder command exceeds limit"
-    );
-    let Some(command) = bytes.strip_suffix(&[0]) else {
-        return Ok(false);
-    };
-    let args = command.split(|byte| *byte == 0).collect::<Vec<_>>();
-    let root = workspace.root.as_os_str().as_bytes();
-    let matches = match args.as_slice() {
-        [_, operation, argument] => {
-            root == b"/sandbox" && *operation == b"hold" && *argument == id.as_bytes()
-        }
-        [_, flag, operation, argument] => {
-            flag.strip_prefix(b"--root=") == Some(root)
-                && *operation == b"hold"
-                && *argument == id.as_bytes()
-        }
-        [_, flag, root_argument, operation, argument] => {
-            *flag == b"--root"
-                && *root_argument == root
-                && *operation == b"hold"
-                && *argument == id.as_bytes()
-        }
-        _ => false,
-    };
-    ensure!(matches, "workspace holder invocation changed");
-    let after = identity(pid)?;
-    let executable = std::fs::metadata(executable_path)?;
-    ensure!(
-        after.start == record.start
-            && after.state != "Z"
-            && executable.dev() == own.dev()
-            && executable.ino() == own.ino(),
-        "workspace holder identity changed during verification"
-    );
-    Ok(true)
+    Ok(current.state == "T")
 }
 
 #[cfg(target_os = "linux")]
@@ -669,7 +623,7 @@ fn export_processes(workspace: &Workspace) -> Result<Vec<Ancestor>> {
         };
         validate_id(id)?;
         if let Some(record) = read_record(workspace, &format!("{id}.hold"))?
-            && verified_holder(workspace, id, &record)?
+            && frozen_holder(&record)?
         {
             allowed.push(Ancestor {
                 pid: record.pid,
@@ -802,6 +756,15 @@ pub async fn hold(_workspace: &Workspace, id: &str) -> Result<()> {
         };
         publish_record(workspace, &format!("{id}.hold"), &record)?;
         loop {
+            if frozen(workspace)? {
+                ensure!(
+                    read_record(workspace, &format!("{id}.hold"))?.as_ref() == Some(&record),
+                    "workspace holder identity was replaced"
+                );
+                // Stop only this process. The exporter checks the kernel's stopped
+                // state; forged records never select a process to signal.
+                rustix::process::kill_process(pid, rustix::process::Signal::STOP)?;
+            }
             if let Some(request) = read_record(workspace, &format!("{id}.hold-exit"))? {
                 ensure!(request == record, "workspace holder stop identity changed");
                 ensure!(
@@ -850,6 +813,88 @@ mod tests {
         thaw(&workspace).expect("thaw does not erase failed drain");
         let error = verify_quiescent(&workspace).expect_err("failed drain is not quiescent");
         assert!(error.to_string().contains("drain remains unverified"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_holder_record_needs_a_kernel_stopped_process() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("owned process");
+        let pid = rustix::process::Pid::from_raw(child.id() as i32).expect("PID");
+        let record = Record {
+            version: 1,
+            pid: child.id(),
+            start: identity(pid).expect("identity").start,
+        };
+        let running = frozen_holder(&record).expect("running observation");
+        rustix::process::kill_process(pid, rustix::process::Signal::STOP)
+            .expect("stop owned process");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while identity(pid).expect("identity").state != "T" && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let stopped = frozen_holder(&record).expect("stopped observation");
+        let forged = Record {
+            start: record.start + 1,
+            ..record
+        };
+        let rejected = frozen_holder(&forged).is_err();
+        child.kill().expect("kill owned process");
+        child.wait().expect("reap owned process");
+        assert!(!running);
+        assert!(stopped);
+        assert!(rejected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stale_holder_replacement_preserves_prior_command_evidence() {
+        let root = tempfile::tempdir().expect("workspace");
+        let workspace = Workspace::open(root.path()).expect("workspace");
+        let id = Uuid::new_v4().to_string();
+        let pid = rustix::process::getpid();
+        let old = Record {
+            version: 1,
+            pid: pid.as_raw_nonzero().get() as u32,
+            start: 0,
+        };
+        publish_record(&workspace, &format!("{id}.hold"), &old).expect("old holder");
+        let directory = process_directory(&workspace).expect("control directory");
+        for suffix in [
+            "cancelled",
+            "cancel.json",
+            "cancel-ack.json",
+            "drain-failed",
+            "capability.json",
+        ] {
+            directory
+                .write(format!("{id}.{suffix}"), b"retained command evidence")
+                .expect("prior evidence");
+        }
+        let current = Record {
+            start: identity(pid).expect("identity").start,
+            ..old
+        };
+        publish_record(&workspace, &format!("{id}.hold"), &current)
+            .expect("replace proven-stale holder");
+        assert!(publish_record(&workspace, &format!("{id}.hold"), &current).is_err());
+        for suffix in [
+            "cancelled",
+            "cancel.json",
+            "cancel-ack.json",
+            "drain-failed",
+            "capability.json",
+        ] {
+            assert_eq!(
+                directory
+                    .read(format!("{id}.{suffix}"))
+                    .expect("retained evidence"),
+                b"retained command evidence"
+            );
+        }
     }
 
     #[test]
