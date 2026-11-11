@@ -556,13 +556,14 @@ pub fn thaw(workspace: &Workspace) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Deserialize, Serialize)]
-struct Ancestor {
+struct ExportProcess {
     pid: u32,
     start: u64,
+    must_be_stopped: bool,
 }
 
 #[cfg(target_os = "linux")]
-fn ancestors(mut pid: rustix::process::Pid) -> Result<Vec<Ancestor>> {
+fn ancestors(mut pid: rustix::process::Pid) -> Result<Vec<ExportProcess>> {
     let mut result = Vec::new();
     loop {
         let process = identity(pid)?;
@@ -574,9 +575,10 @@ fn ancestors(mut pid: rustix::process::Pid) -> Result<Vec<Ancestor>> {
         };
         pid = parent;
         let process = identity(pid)?;
-        result.push(Ancestor {
+        result.push(ExportProcess {
             pid: pid.as_raw_nonzero().get() as u32,
             start: process.start,
+            must_be_stopped: false,
         });
         ensure!(
             result.len() <= 128,
@@ -611,7 +613,7 @@ fn frozen_holder(record: &Record) -> Result<bool> {
 }
 
 #[cfg(target_os = "linux")]
-fn export_processes(workspace: &Workspace) -> Result<Vec<Ancestor>> {
+fn export_processes(workspace: &Workspace) -> Result<Vec<ExportProcess>> {
     let mut allowed = ancestors(rustix::process::getpid())?;
     for entry in process_directory(workspace)?.entries()? {
         let name = entry?.file_name();
@@ -625,9 +627,10 @@ fn export_processes(workspace: &Workspace) -> Result<Vec<Ancestor>> {
         if let Some(record) = read_record(workspace, &format!("{id}.hold"))?
             && frozen_holder(&record)?
         {
-            allowed.push(Ancestor {
+            allowed.push(ExportProcess {
                 pid: record.pid,
                 start: record.start,
+                must_be_stopped: true,
             });
             ensure!(allowed.len() <= 4096, "workspace holder limit exceeded");
         }
@@ -707,7 +710,7 @@ pub(super) fn verify_frozen_export(workspace: &Workspace) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn require_quiescent(allowed: &[Ancestor]) -> Result<()> {
+fn require_quiescent(allowed: &[ExportProcess]) -> Result<()> {
     let own = rustix::process::getpid().as_raw_nonzero().get() as u32;
     for entry in std::fs::read_dir("/proc")? {
         let entry = entry?;
@@ -728,17 +731,22 @@ fn require_quiescent(allowed: &[Ancestor]) -> Result<()> {
             Err(error) if is_missing(&error) => continue,
             Err(error) => return Err(error),
         };
-        if current.state == "Z"
-            || allowed
-                .iter()
-                .any(|allowed| allowed.pid == raw && allowed.start == current.start)
-        {
-            continue;
-        }
-        anyhow::bail!(
-            "workspace still has an untracked live process ({raw}); refusing a non-quiescent export"
-        );
+        require_export_process(allowed, raw, &current)?;
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn require_export_process(allowed: &[ExportProcess], pid: u32, current: &Identity) -> Result<()> {
+    ensure!(
+        current.state == "Z"
+            || allowed.iter().any(|allowed| {
+                allowed.pid == pid
+                    && allowed.start == current.start
+                    && (!allowed.must_be_stopped || current.state == "T")
+            }),
+        "workspace still has an untracked live process ({pid}); refusing a non-quiescent export"
+    );
     Ok(())
 }
 
@@ -847,6 +855,50 @@ mod tests {
         assert!(!running);
         assert!(stopped);
         assert!(rejected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_resumed_holder_is_rejected_by_the_export_scan() {
+        let root = tempfile::tempdir().expect("workspace");
+        let workspace = Workspace::open(root.path()).expect("workspace");
+        let id = Uuid::new_v4().to_string();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("owned process");
+        let pid = rustix::process::Pid::from_raw(child.id() as i32).expect("PID");
+        let record = Record {
+            version: 1,
+            pid: child.id(),
+            start: identity(pid).expect("identity").start,
+        };
+        publish_record(&workspace, &format!("{id}.hold"), &record).expect("holder record");
+        rustix::process::kill_process(pid, rustix::process::Signal::STOP)
+            .expect("stop owned process");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while identity(pid).expect("identity").state != "T" && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let allowed = export_processes(&workspace).expect("stopped process snapshot");
+        rustix::process::kill_process(pid, rustix::process::Signal::CONT)
+            .expect("resume owned test process");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while identity(pid).expect("identity").state == "T" && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let current = identity(pid).expect("resumed identity");
+        let rejected = require_export_process(&allowed, record.pid, &current).is_err();
+        let scan_rejected = require_quiescent(&allowed).is_err();
+        child.kill().expect("kill owned process");
+        child.wait().expect("reap owned process");
+        assert!(
+            rejected,
+            "a stopped snapshot must not exempt a running holder"
+        );
+        assert!(scan_rejected);
     }
 
     #[cfg(target_os = "linux")]
