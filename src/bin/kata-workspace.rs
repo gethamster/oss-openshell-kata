@@ -70,7 +70,11 @@ enum Operation {
     },
 }
 
-#[tokio::main]
+// Two workers, not one for each CPU. This helper waits on one command and on files; a
+// sandbox with a CPU quota reports its host's CPUs, and each worker thread takes one of
+// the sandbox's process slots. Foundry, 11 November 2026: on a host with 192 CPUs the two
+// controllers of one thread sandbox held 386 threads of its 2,048 slots while idle.
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> ExitCode {
     match execute(Cli::parse()).await {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
