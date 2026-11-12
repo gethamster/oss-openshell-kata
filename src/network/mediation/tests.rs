@@ -1,6 +1,6 @@
 use super::*;
 use crate::network::{
-    Endpoint, InspectedEndpoint, NetworkPolicy,
+    Endpoint, InspectedEndpoint, NetworkPolicy, RestAccess,
     broker::{BrokerHandle, Connector, Stream, bind_with_connector},
 };
 use crate::proto::openshell::v1::{
@@ -91,7 +91,39 @@ async fn origin() -> Result<Origin> {
                     .unwrap_or(0);
                 let mut body = vec![0; length];
                 let _ = stream.read_exact(&mut body).await;
+                let upgrade = head.contains("Upgrade: websocket");
+                let path = head.split(' ').nth(1).unwrap_or_default().to_owned();
                 recorded.lock().expect("origin lock").push(head);
+                if upgrade && path == "/socket" {
+                    // Switch protocols, then echo every byte until the peer closes.
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+                        .await;
+                    let mut bytes = [0; 1024];
+                    while let Ok(count) = stream.read(&mut bytes).await {
+                        if count == 0 || stream.write_all(&bytes[..count]).await.is_err() {
+                            break;
+                        }
+                    }
+                    return;
+                }
+                if upgrade {
+                    // Refuse the upgrade and keep the connection open, as an
+                    // origin that ignores `Upgrade` does. Record whatever the
+                    // peer sends next.
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nno")
+                        .await;
+                    let mut next = Vec::new();
+                    let _ = stream.read_to_end(&mut next).await;
+                    if !next.is_empty() {
+                        recorded
+                            .lock()
+                            .expect("origin lock")
+                            .push(String::from_utf8_lossy(&next).into_owned());
+                    }
+                    return;
+                }
                 let _ = stream
                     .write_all(
                         b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
@@ -132,6 +164,11 @@ struct Fixture {
     guest_ca: String,
 }
 async fn fixture(guest: IpAddr, access: RestAccess) -> Result<Fixture> {
+    fixture_with(guest, access, false).await
+}
+
+/// `uninspected` sets `allow_uninspected_credentials` on every destination.
+async fn fixture_with(guest: IpAddr, access: RestAccess, uninspected: bool) -> Result<Fixture> {
     let origin = origin().await?;
     let ca = SandboxCa::generate().map_err(|_| anyhow!("sandbox CA"))?;
     let guest_ca = ca.cert_pem().to_owned();
@@ -155,6 +192,7 @@ async fn fixture(guest: IpAddr, access: RestAccess) -> Result<Fixture> {
                 host: host.into(),
                 port: 443,
                 access,
+                allow_uninspected_credentials: uninspected,
             })
             .collect(),
         ..Default::default()
@@ -174,12 +212,8 @@ async fn fixture(guest: IpAddr, access: RestAccess) -> Result<Fixture> {
     })
 }
 
-/// Act as a guest process: CONNECT, trust the sandbox CA, send one request.
-async fn guest_request(fixture: &Fixture, host: &str, request: &str) -> Result<String> {
-    let mut stream = TcpStream::connect(fixture.broker.local_addr()).await?;
-    stream
-        .write_all(format!("CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n").as_bytes())
-        .await?;
+/// Read one HTTP head, byte by byte so nothing after it is consumed.
+async fn read_head(stream: &mut (impl AsyncRead + Unpin)) -> Result<String> {
     let mut head = Vec::new();
     let mut byte = [0; 1];
     while !head.ends_with(b"\r\n\r\n") {
@@ -188,10 +222,33 @@ async fn guest_request(fixture: &Fixture, host: &str, request: &str) -> Result<S
         }
         head.push(byte[0]);
     }
-    let head = String::from_utf8_lossy(&head).into_owned();
-    if !head.starts_with("HTTP/1.1 200") {
-        return Ok(head);
-    }
+    Ok(String::from_utf8_lossy(&head).into_owned())
+}
+
+/// Act as a guest process: CONNECT through the broker. A refused CONNECT
+/// returns the broker's answer instead of a tunnel.
+async fn guest_connect(
+    fixture: &Fixture,
+    host: &str,
+) -> Result<std::result::Result<TcpStream, String>> {
+    let mut stream = TcpStream::connect(fixture.broker.local_addr()).await?;
+    stream
+        .write_all(format!("CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n").as_bytes())
+        .await?;
+    let head = read_head(&mut stream).await?;
+    Ok(if head.starts_with("HTTP/1.1 200") {
+        Ok(stream)
+    } else {
+        Err(head)
+    })
+}
+
+/// Act as a guest process: CONNECT, trust the sandbox CA, send one request.
+async fn guest_request(fixture: &Fixture, host: &str, request: &str) -> Result<String> {
+    let stream = match guest_connect(fixture, host).await? {
+        Ok(stream) => stream,
+        Err(refusal) => return Ok(refusal),
+    };
     let trust = build_upstream_client_config(&fixture.guest_ca).map_err(|_| anyhow!("roots"))?;
     let mut tls = tls_connect_upstream(stream, host, &trust)
         .await
@@ -498,5 +555,184 @@ async fn inspected_destinations_admit_only_the_fenced_guest() -> Result<()> {
     .await?;
     assert!(response.starts_with("HTTP/1.1 403"), "{response}");
     assert_eq!(fixture.connector.dials.load(Ordering::Relaxed), 0);
+    Ok(())
+}
+
+fn upgrade_request(path: &str, token: &str) -> String {
+    format!(
+        "GET {path} HTTP/1.1\r\nHost: {HOST}\r\nAuthorization: Bearer {token}\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    )
+}
+
+#[tokio::test]
+async fn opted_out_destination_relays_a_websocket_unread() -> Result<()> {
+    let fixture = fixture_with("127.0.0.1".parse()?, RestAccess::ReadWrite, true).await?;
+    let mediation = fixture.broker.mediation().context("mediation")?;
+    let token = placeholder(&mediation.install(&snapshot(1, Some(SECRET))));
+
+    let stream = guest_connect(&fixture, HOST)
+        .await?
+        .map_err(|refusal| anyhow!("CONNECT refused: {refusal}"))?;
+    let trust = build_upstream_client_config(&fixture.guest_ca).map_err(|_| anyhow!("roots"))?;
+    let mut socket = tls_connect_upstream(stream, HOST, &trust)
+        .await
+        .map_err(|error| anyhow!("guest TLS: {error}"))?;
+    socket
+        .write_all(upgrade_request("/socket", &token).as_bytes())
+        .await?;
+    let head = read_head(&mut socket).await?;
+    assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+    // The handshake is inspected like any request: the credential is
+    // substituted, hop-by-hop fields are rebuilt, the key is end-to-end.
+    let heads = fixture.origin.heads.lock().expect("origin lock").clone();
+    assert_eq!(heads.len(), 1);
+    assert!(heads[0].contains(&format!("Authorization: Bearer {SECRET}")));
+    assert!(heads[0].contains("Connection: Upgrade\r\nUpgrade: websocket\r\n"));
+    assert!(heads[0].contains("Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=="));
+    assert!(!heads[0].contains("keep-alive") && !heads[0].contains(&token));
+
+    // Messages are relayed unread in both directions, repeatedly: a
+    // conversation that holds OpenShell's reserved reference text, or even a
+    // placeholder, passes unchanged and is never resolved.
+    for message in [
+        "a file that names openshell:resolve:env:NOT_A_CREDENTIAL and OPENSHELL-RESOLVE-ENV-X"
+            .to_owned(),
+        format!("a placeholder stays a placeholder: {token}"),
+    ] {
+        socket.write_all(message.as_bytes()).await?;
+        let mut echoed = vec![0; message.len()];
+        socket.read_exact(&mut echoed).await?;
+        assert_eq!(String::from_utf8(echoed)?, message);
+    }
+
+    // A refreshed credential keeps the socket it authorized.
+    mediation.install(&snapshot(2, Some(SECRET)));
+    socket.write_all(b"still open").await?;
+    let mut echoed = [0; 10];
+    socket.read_exact(&mut echoed).await?;
+    assert_eq!(&echoed, b"still open");
+
+    // A snapshot that removes the credential ends it.
+    mediation.install(&snapshot(3, None));
+    let mut rest = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut rest))
+        .await
+        .context("a WebSocket outlives its removed credential")?;
+    assert!(rest.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn revocation_ends_a_relayed_websocket() -> Result<()> {
+    let fixture = fixture_with("127.0.0.1".parse()?, RestAccess::ReadWrite, true).await?;
+    let mediation = fixture.broker.mediation().context("mediation")?;
+    let token = placeholder(&mediation.install(&snapshot(1, Some(SECRET))));
+    let stream = guest_connect(&fixture, HOST)
+        .await?
+        .map_err(|refusal| anyhow!("CONNECT refused: {refusal}"))?;
+    let trust = build_upstream_client_config(&fixture.guest_ca).map_err(|_| anyhow!("roots"))?;
+    let mut socket = tls_connect_upstream(stream, HOST, &trust)
+        .await
+        .map_err(|error| anyhow!("guest TLS: {error}"))?;
+    // Client bytes sent with the handshake are relayed after the switch.
+    socket
+        .write_all(format!("{}early", upgrade_request("/socket", &token)).as_bytes())
+        .await?;
+    assert!(read_head(&mut socket).await?.starts_with("HTTP/1.1 101"));
+    let mut echoed = [0; 5];
+    socket.read_exact(&mut echoed).await?;
+    assert_eq!(&echoed, b"early");
+    mediation.revoke();
+    let mut rest = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut rest))
+        .await
+        .context("a revoked WebSocket stays open")?;
+    assert!(rest.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_upgrades_need_the_opt_out_and_a_writing_preset() -> Result<()> {
+    // Without the opt-out an upgrade is a malformed request, as before.
+    let fixture = fixture("127.0.0.1".parse()?, RestAccess::ReadWrite).await?;
+    let mediation = fixture.broker.mediation().context("mediation")?;
+    let token = placeholder(&mediation.install(&snapshot(1, Some(SECRET))));
+    let response = guest_request(&fixture, HOST, &upgrade_request("/socket", &token)).await?;
+    assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+    assert!(fixture.origin.heads.lock().expect("origin lock").is_empty());
+
+    // A read-only destination admits no client messages.
+    let fixture = fixture_with("127.0.0.1".parse()?, RestAccess::ReadOnly, true).await?;
+    let mediation = fixture.broker.mediation().context("mediation")?;
+    let token = placeholder(&mediation.install(&snapshot(1, Some(SECRET))));
+    let response = guest_request(&fixture, HOST, &upgrade_request("/socket", &token)).await?;
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    assert!(fixture.origin.heads.lock().expect("origin lock").is_empty());
+
+    // Only a bodiless WebSocket GET is an upgrade.
+    let fixture = fixture_with("127.0.0.1".parse()?, RestAccess::Full, true).await?;
+    // An origin echoes the subprotocol it selects, so no credential goes there.
+    let mediation = fixture.broker.mediation().context("mediation")?;
+    let token = placeholder(&mediation.install(&snapshot(1, Some(SECRET))));
+    let reflected = upgrade_request("/socket", &token).replace(
+        "Sec-WebSocket-Version: 13",
+        &format!("Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: bearer.{token}"),
+    );
+    let response = guest_request(&fixture, HOST, &reflected).await?;
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    for request in [
+        format!(
+            "POST /socket HTTP/1.1\r\nHost: {HOST}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"
+        ),
+        format!(
+            "GET /socket HTTP/1.1\r\nHost: {HOST}\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n"
+        ),
+        format!("GET /socket HTTP/1.1\r\nHost: {HOST}\r\nUpgrade: websocket\r\n\r\n"),
+        format!(
+            "GET /socket HTTP/1.1\r\nHost: {HOST}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nContent-Length: 1\r\n\r\nx"
+        ),
+    ] {
+        let response = guest_request(&fixture, HOST, &request).await?;
+        assert!(
+            response.starts_with("HTTP/1.1 400"),
+            "{request} -> {response}"
+        );
+    }
+    assert!(fixture.origin.heads.lock().expect("origin lock").is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refused_upgrade_never_becomes_an_uninspected_tunnel() -> Result<()> {
+    let fixture = fixture_with("127.0.0.1".parse()?, RestAccess::ReadWrite, true).await?;
+    let mediation = fixture.broker.mediation().context("mediation")?;
+    let token = placeholder(&mediation.install(&snapshot(1, Some(SECRET))));
+    let stream = guest_connect(&fixture, HOST)
+        .await?
+        .map_err(|refusal| anyhow!("CONNECT refused: {refusal}"))?;
+    let trust = build_upstream_client_config(&fixture.guest_ca).map_err(|_| anyhow!("roots"))?;
+    let mut tunnel = tls_connect_upstream(stream, HOST, &trust)
+        .await
+        .map_err(|error| anyhow!("guest TLS: {error}"))?;
+    // The origin answers 200 and keeps its connection open. A second request
+    // on the tunnel would bypass the access preset if it were relayed.
+    let smuggled = format!("DELETE /v1/files/1 HTTP/1.1\r\nHost: {HOST}\r\n\r\n");
+    tunnel
+        .write_all(format!("{}{smuggled}", upgrade_request("/plain", &token)).as_bytes())
+        .await?;
+    let mut response = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), tunnel.read_to_end(&mut response))
+        .await
+        .context("a refused upgrade keeps the tunnel open")?;
+    let response = String::from_utf8_lossy(&response);
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK") && response.ends_with("no"),
+        "{response}"
+    );
+    drop(tunnel);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let heads = fixture.origin.heads.lock().expect("origin lock").clone();
+    assert_eq!(heads.len(), 1, "{heads:?}");
+    assert!(heads[0].starts_with("GET /plain"));
     Ok(())
 }

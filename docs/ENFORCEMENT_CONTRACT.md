@@ -214,15 +214,22 @@ network_policies:
         protocol: rest
         access: read-write
         enforcement: enforce
-      - host: chatgpt.com       # uncredentialed: unchanged opaque TCP
+      - host: chatgpt.com       # credentialed, with a WebSocket (see below)
+        port: 443
+        protocol: rest
+        access: read-write
+        enforcement: enforce
+        allow_uninspected_credentials: true
+      - host: example.com       # uncredentialed: unchanged opaque TCP
         port: 443
         tls: skip
 ```
 
 Omit `tls` (OpenShell's default selects inspection); `tls: skip`, audit mode,
 explicit `rules`/`deny_rules`, `path`, credential binding/signing, body or
-WebSocket rewriting, `allow_uninspected_credentials`, private-IP overrides, and
-IP-literal hosts are rejected. The gateway stamps `provider_credentialed` on
+WebSocket rewriting, private-IP overrides, and IP-literal hosts are rejected.
+`allow_uninspected_credentials` is accepted on an inspected REST endpoint only;
+an opaque TCP endpoint and the hosted profile reject it. The gateway stamps `provider_credentialed` on
 endpoints its attached providers bind, and requires a stamped endpoint to be
 inspected; a stamped TCP endpoint is rejected here as well. One host/port is
 either opaque or inspected, never both; matching REST rules union their
@@ -254,9 +261,31 @@ The host broker enforces the following for an inspected destination:
   guest's own address; plain-HTTP forwarding and other peers are refused.
 - **One request per tunnel, with OpenShell L7 handling.** The broker requires an
   origin-form HTTP/1.x request whose `Host` names the tunnel destination,
-  rejects upgrades, HTTP/2, ambiguous framing and smuggling forms, applies the
+  rejects HTTP/2, ambiguous framing and smuggling forms, applies the
   REST access preset (read-only: GET/HEAD/OPTIONS; read-write adds
   POST/PUT/PATCH; full admits all), and forwards with `Connection: close`.
+  It reads and rewrites the request head only. A request body is relayed
+  unread: the broker never resolves or refuses reference text in a body.
+- **Upgrades are refused unless the destination opts out of content
+  inspection.** `allow_uninspected_credentials: true` is OpenShell's opt-in to
+  credential-bearing traffic that the proxy does not read. Here it admits one
+  thing: a WebSocket upgrade (a bodiless HTTP/1.1 `GET` with
+  `Upgrade: websocket`) at a destination whose preset admits a request body
+  (read-write or full). The handshake request passes every check above,
+  including credential substitution in its head, except that a placeholder in
+  a `Sec-WebSocket-*` field is refused: an origin echoes the subprotocol it
+  selects, and the guest reads that answer. Only when the origin answers
+  `101 Switching Protocols` to WebSocket does the tunnel carry frames, in both
+  directions and unread, until either side closes. Any other answer is
+  returned as the one response and the tunnel closes; no further guest bytes
+  reach the origin. A relayed WebSocket ends when the broker revokes its
+  credentials, when a provider snapshot removes a credential (a refreshed
+  credential keeps its sockets), when the policy generation is replaced, and
+  with the sandbox.
+  The opt-out holds for a destination only when every sandbox rule that names
+  it sets the field; rules that disagree keep upgrades refused. A
+  gateway-composed provider rule never opts a destination out. Without the
+  field an upgrade is a malformed request (`400`), as before.
 - **OpenShell substitutes credentials.** Placeholders in the request line and
   headers (including Basic authorization) are resolved by OpenShell's
   `ProviderCredentialState` and `rewrite_http_header_block`, only for

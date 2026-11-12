@@ -113,10 +113,10 @@ fn hosted_and_strict_compilation_never_inspect() {
 fn credentialed_endpoints_outside_the_supported_shape_fail_closed() {
     let cases: Vec<(&str, NetworkEndpoint)> = vec![
         (
-            "uninspected credentials",
+            "uninspected credentials on opaque TCP",
             NetworkEndpoint {
                 allow_uninspected_credentials: true,
-                ..rest("api.anthropic.com", 2)
+                ..skip("api.anthropic.com")
             },
         ),
         (
@@ -236,6 +236,117 @@ fn matching_rest_rules_union_their_presets() -> Result<()> {
     Ok(())
 }
 
+/// An inspected REST endpoint that opts out of content inspection, as
+/// System's model and coding-harness rules do.
+fn uninspected(host: &str, access: i32) -> NetworkEndpoint {
+    NetworkEndpoint {
+        allow_uninspected_credentials: true,
+        ..rest(host, access)
+    }
+}
+
+#[test]
+fn the_content_opt_out_holds_only_when_every_rule_for_a_destination_sets_it() -> Result<()> {
+    let flags = |native: &SandboxPolicy| -> Result<Vec<(String, bool)>> {
+        Ok(compile_native_with_inspection(native, &ceiling())?
+            .tls_inspect
+            .into_iter()
+            .map(|endpoint| (endpoint.host, endpoint.allow_uninspected_credentials))
+            .collect())
+    };
+    // One rule: the opt-out is per destination.
+    let native = policy(vec![(
+        "models",
+        rule(
+            "/**",
+            vec![uninspected("chatgpt.com", 2), rest("api.github.com", 2)],
+        ),
+    )]);
+    assert_eq!(
+        flags(&native)?,
+        [
+            ("api.github.com".into(), false),
+            ("chatgpt.com".into(), true)
+        ]
+    );
+    // Rules that agree keep it; presets still union.
+    let agree = policy(vec![
+        ("codex", rule("/**", vec![uninspected("chatgpt.com", 1)])),
+        ("models", rule("/**", vec![uninspected("ChatGPT.com.", 2)])),
+    ]);
+    let compiled = compile_native_with_inspection(&agree, &ceiling())?;
+    assert_eq!(
+        compiled.tls_inspect,
+        vec![InspectedEndpoint {
+            host: "chatgpt.com".into(),
+            port: 443,
+            access: RestAccess::ReadWrite,
+            allow_uninspected_credentials: true,
+        }]
+    );
+    // Rules that disagree keep the stricter behavior, in either order.
+    for (first, second) in [("a", "b"), ("b", "a")] {
+        let disagree = policy(vec![
+            (first, rule("/**", vec![uninspected("chatgpt.com", 2)])),
+            (second, rule("/**", vec![rest("chatgpt.com", 2)])),
+        ]);
+        assert_eq!(flags(&disagree)?, [("chatgpt.com".into(), false)]);
+    }
+    // A gateway-composed provider rule grants nothing, and so opts nothing out.
+    let provider_only = policy(vec![
+        (
+            "_provider_codex_0123456789ab",
+            rule("/usr/local/bin/codex", vec![uninspected("chatgpt.com", 2)]),
+        ),
+        ("models", rule("/**", vec![rest("chatgpt.com", 2)])),
+    ]);
+    assert_eq!(flags(&provider_only)?, [("chatgpt.com".into(), false)]);
+    // Without an inspecting broker the field stays refused.
+    assert!(compile_native(&native, &ceiling()).is_err());
+    Ok(())
+}
+
+#[test]
+fn the_content_opt_out_is_part_of_the_canonical_policy() -> Result<()> {
+    let compile = |endpoint: NetworkEndpoint| {
+        compile_native_with_inspection(
+            &policy(vec![("models", rule("/**", vec![endpoint]))]),
+            &ceiling(),
+        )
+    };
+    let scanned = compile(rest("chatgpt.com", 2))?;
+    let opted_out = compile(uninspected("chatgpt.com", 2))?;
+    // A policy without the opt-out keeps its earlier encoding and digest.
+    assert_eq!(
+        serde_json::to_string(&scanned)?,
+        r#"{"tcp_allow":[{"host":"chatgpt.com","port":443}],"tls_inspect":[{"host":"chatgpt.com","port":443,"access":"read-write"}]}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&opted_out)?,
+        r#"{"tcp_allow":[{"host":"chatgpt.com","port":443}],"tls_inspect":[{"host":"chatgpt.com","port":443,"access":"read-write","allow_uninspected_credentials":true}]}"#
+    );
+    assert_ne!(scanned.digest()?, opted_out.digest()?);
+    // The broker reads the flag back from the validated, normalized policy.
+    let restored: NetworkPolicy = serde_json::from_str(&serde_json::to_string(&opted_out)?)?;
+    assert_eq!(restored.normalized()?, opted_out);
+    let inspection = restored
+        .validate()?
+        .inspection("chatgpt.com", 443)
+        .expect("inspected");
+    assert!(inspection.allow_uninspected_credentials);
+    assert_eq!(inspection.access, RestAccess::ReadWrite);
+    assert!(
+        !scanned
+            .validate()?
+            .inspection("chatgpt.com", 443)
+            .expect("inspected")
+            .allow_uninspected_credentials
+    );
+    // The opt-out needs no wider ceiling: it changes handling, not reach.
+    assert!(opted_out.is_subset_of(&ceiling())?);
+    Ok(())
+}
+
 #[test]
 fn provider_composed_rules_grant_nothing_in_a_vm() -> Result<()> {
     // The gateway composes one `_provider_*` rule per attached provider from
@@ -285,6 +396,7 @@ fn inspected_destinations_must_be_allowed_dns_names() {
             host: "api.anthropic.com".into(),
             port: 443,
             access: RestAccess::Full,
+            allow_uninspected_credentials: false,
         }],
         ..Default::default()
     };
@@ -413,6 +525,7 @@ fn public_ports_never_grant_inspection_or_credentials() -> Result<()> {
             host: "api.github.com".into(),
             port: 443,
             access: RestAccess::ReadWrite,
+            allow_uninspected_credentials: false,
         }]
     );
     assert!(compiled.is_subset_of(&ceiling)?);
@@ -426,6 +539,7 @@ fn public_ports_never_grant_inspection_or_credentials() -> Result<()> {
             host: "evil.example.org".into(),
             port: 443,
             access: RestAccess::Full,
+            allow_uninspected_credentials: false,
         }],
         ..Default::default()
     };

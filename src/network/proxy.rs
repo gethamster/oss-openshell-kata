@@ -47,24 +47,50 @@ async fn read_raw_head<R: AsyncBufRead + Unpin>(input: &mut R) -> Result<Vec<u8>
 pub(crate) struct InspectedRequest {
     pub method: String,
     pub target: String,
-    /// The head to forward: hop-by-hop fields removed, `Connection: close`.
+    /// The head to forward: hop-by-hop fields removed, `Connection: close`,
+    /// or the upgrade fields when `upgrade` is set.
     pub forward: Vec<u8>,
     pub body: Body,
+    /// A WebSocket upgrade: the origin answers `101` and the tunnel then
+    /// carries WebSocket frames instead of one response.
+    pub upgrade: bool,
 }
 
 /// Read one request whose `Host` must name the tunnel's own authority.
+/// A WebSocket upgrade is a malformed request unless `admit_upgrade`.
 pub(crate) async fn read_inspected_head<R: AsyncBufRead + Unpin>(
     input: &mut R,
     host: &str,
     port: u16,
+    admit_upgrade: bool,
 ) -> Result<InspectedRequest> {
-    parse_inspected_head(&read_raw_head(input).await?, host, port)
+    parse_inspected_head(&read_raw_head(input).await?, host, port, admit_upgrade)
 }
 
 /// Framing and hop-by-hop fields of a parsed request head.
 struct Framing {
     body: Body,
     connection_fields: BTreeSet<String>,
+    /// The value of every `Upgrade` field.
+    upgrades: Vec<String>,
+}
+
+/// Whether a request is the one supported upgrade: a bodiless HTTP/1.1 `GET`
+/// to WebSocket. Any other upgrade is refused.
+fn websocket_upgrade(method: &str, version: Option<u8>, framing: &Framing) -> Result<bool> {
+    if framing.upgrades.is_empty() {
+        return Ok(false);
+    }
+    if framing.upgrades.len() != 1
+        || !framing.upgrades[0].eq_ignore_ascii_case("websocket")
+        || !framing.connection_fields.contains("upgrade")
+        || method != "GET"
+        || version != Some(1)
+        || framing.body != Body::None
+    {
+        bail!("only a WebSocket upgrade of a bodiless HTTP/1.1 GET is supported");
+    }
+    Ok(true)
 }
 
 fn framing(request: &httparse::Request<'_, '_>) -> Result<Framing> {
@@ -74,6 +100,7 @@ fn framing(request: &httparse::Request<'_, '_>) -> Result<Framing> {
     let mut length = None;
     let mut chunked = false;
     let mut connection_fields = BTreeSet::new();
+    let mut upgrades = Vec::new();
     for header in request.headers.iter() {
         let value = std::str::from_utf8(header.value)?.trim();
         if header.name.eq_ignore_ascii_case("content-length") {
@@ -97,7 +124,7 @@ fn framing(request: &httparse::Request<'_, '_>) -> Result<Framing> {
             }
         }
         if header.name.eq_ignore_ascii_case("upgrade") {
-            bail!("use CONNECT for upgraded protocols");
+            upgrades.push(value.to_owned());
         }
     }
     if length.is_some() && chunked {
@@ -118,6 +145,7 @@ fn framing(request: &httparse::Request<'_, '_>) -> Result<Framing> {
     Ok(Framing {
         body,
         connection_fields,
+        upgrades,
     })
 }
 
@@ -151,7 +179,12 @@ fn forward_fields(
     forward.extend_from_slice(b"\r\n");
 }
 
-fn parse_inspected_head(bytes: &[u8], host: &str, port: u16) -> Result<InspectedRequest> {
+fn parse_inspected_head(
+    bytes: &[u8],
+    host: &str,
+    port: u16,
+    admit_upgrade: bool,
+) -> Result<InspectedRequest> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut request = httparse::Request::new(&mut headers);
     if !request.parse(bytes)?.is_complete() {
@@ -166,6 +199,10 @@ fn parse_inspected_head(bytes: &[u8], host: &str, port: u16) -> Result<Inspected
         bail!("inspected requests require an origin-form target");
     }
     let framing = framing(&request)?;
+    let upgrade = websocket_upgrade(&method, request.version, &framing)?;
+    if upgrade && !admit_upgrade {
+        bail!("this destination does not admit upgraded protocols");
+    }
     let mut authorities = request
         .headers
         .iter()
@@ -183,8 +220,13 @@ fn parse_inspected_head(bytes: &[u8], host: &str, port: u16) -> Result<Inspected
     } else {
         format!("{}:{port}", named.host)
     };
+    let connection = if upgrade {
+        "Connection: Upgrade\r\nUpgrade: websocket"
+    } else {
+        "Connection: close"
+    };
     let mut forward =
-        format!("{method} {target} HTTP/1.1\r\nHost: {host_field}\r\nConnection: close\r\n")
+        format!("{method} {target} HTTP/1.1\r\nHost: {host_field}\r\n{connection}\r\n")
             .into_bytes();
     forward_fields(&mut forward, &request, &framing.connection_fields);
     Ok(InspectedRequest {
@@ -192,7 +234,104 @@ fn parse_inspected_head(bytes: &[u8], host: &str, port: u16) -> Result<Inspected
         target,
         forward,
         body: framing.body,
+        upgrade,
     })
+}
+
+/// The origin's answer to a WebSocket upgrade request.
+#[derive(Debug)]
+pub(crate) struct UpgradeResponse {
+    /// The response head, after any interim (`1xx`) heads that came first.
+    pub head: Vec<u8>,
+    pub answer: UpgradeAnswer,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpgradeAnswer {
+    /// `101 Switching Protocols` to WebSocket.
+    Switched,
+    /// A final response. Its body has this framing; `None` ends with the
+    /// connection.
+    Refused(Option<Body>),
+}
+
+/// Read the answer to an upgrade request. Only `101` to WebSocket switches
+/// protocols; the caller must not relay client bytes after any other answer.
+pub(crate) async fn read_upgrade_response<R: AsyncBufRead + Unpin>(
+    input: &mut R,
+) -> Result<UpgradeResponse> {
+    let mut head = Vec::new();
+    // An origin may send interim responses (for example 103) before its answer.
+    for _ in 0..4 {
+        let raw = read_raw_head(input).await?;
+        let answer = parse_upgrade_response(&raw)?;
+        head.extend_from_slice(&raw);
+        if let Some(answer) = answer {
+            return Ok(UpgradeResponse { head, answer });
+        }
+    }
+    bail!("too many interim responses");
+}
+
+/// `None` for an interim response that another response follows.
+fn parse_upgrade_response(bytes: &[u8]) -> Result<Option<UpgradeAnswer>> {
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut response = httparse::Response::new(&mut headers);
+    if !response.parse(bytes)?.is_complete() {
+        bail!("incomplete response headers");
+    }
+    if response.version != Some(1) {
+        bail!("unsupported HTTP version");
+    }
+    let code = response.code.context("response status required")?;
+    let mut length = None;
+    let mut chunked = false;
+    let mut encoded = false;
+    let mut websocket = false;
+    let mut connection_upgrade = false;
+    for header in response.headers.iter() {
+        let value = std::str::from_utf8(header.value)?.trim();
+        if header.name.eq_ignore_ascii_case("content-length") {
+            if length.is_some() || value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                bail!("invalid response content length");
+            }
+            length = Some(value.parse::<u64>()?);
+        }
+        if header.name.eq_ignore_ascii_case("transfer-encoding") {
+            encoded = true;
+            // `chunked` is always the final coding when it is present.
+            chunked = value
+                .rsplit(',')
+                .next()
+                .is_some_and(|coding| coding.trim().eq_ignore_ascii_case("chunked"));
+        }
+        if header.name.eq_ignore_ascii_case("upgrade") {
+            websocket = value.eq_ignore_ascii_case("websocket");
+        }
+        if header.name.eq_ignore_ascii_case("connection") {
+            connection_upgrade |= value
+                .split(',')
+                .any(|field| field.trim().eq_ignore_ascii_case("upgrade"));
+        }
+    }
+    if code == 101 {
+        if !websocket || !connection_upgrade {
+            bail!("origin switched to an unsupported protocol");
+        }
+        return Ok(Some(UpgradeAnswer::Switched));
+    }
+    if (100..200).contains(&code) {
+        return Ok(None);
+    }
+    let body = if code == 204 || code == 304 {
+        Some(Body::None)
+    } else if chunked {
+        Some(Body::Chunked)
+    } else if encoded {
+        None
+    } else {
+        length.map(Body::Length)
+    };
+    Ok(Some(UpgradeAnswer::Refused(body)))
 }
 
 fn authority_from(value: &str, default_port: Option<u16>) -> Result<Endpoint> {
@@ -239,7 +378,11 @@ fn parse_head(bytes: &[u8]) -> Result<RequestHead> {
     let Framing {
         body,
         connection_fields,
+        upgrades,
     } = framing(&request)?;
+    if !upgrades.is_empty() {
+        bail!("use CONNECT for upgraded protocols");
+    }
     if method == "CONNECT" {
         if !matches!(body, Body::None | Body::Length(0)) {
             bail!("CONNECT cannot have an HTTP request body");
@@ -372,6 +515,92 @@ mod tests {
         let mut remaining = String::new();
         input.read_to_string(&mut remaining).await?;
         assert_eq!(remaining, "ignored");
+        Ok(())
+    }
+    #[tokio::test]
+    async fn only_a_websocket_101_switches_protocols() -> Result<()> {
+        let read = |bytes: &'static [u8]| async move {
+            let mut input = tokio::io::BufReader::new(bytes);
+            let response = read_upgrade_response(&mut input).await?;
+            let mut rest = Vec::new();
+            input.read_to_end(&mut rest).await?;
+            Ok::<_, anyhow::Error>((response, rest))
+        };
+        // Bytes after the head stay in the reader for the relay.
+        let (response, rest) = read(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: WebSocket\r\nConnection: keep-alive, Upgrade\r\n\r\nframe").await?;
+        assert_eq!(response.answer, UpgradeAnswer::Switched);
+        assert_eq!(rest, b"frame");
+        // Interim responses pass through in front of the answer.
+        let (response, _) = read(b"HTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\nHTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n").await?;
+        assert_eq!(response.answer, UpgradeAnswer::Switched);
+        assert!(
+            response.head.starts_with(b"HTTP/1.1 103")
+                && response.head.ends_with(b"Upgrade\r\n\r\n")
+        );
+        // A final response is a refusal, with the framing of its body.
+        for (bytes, body) in [
+            (
+                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\n\r\nno".as_slice(),
+                Some(Body::Length(2)),
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
+                Some(Body::Chunked),
+            ),
+            (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n", None),
+            (
+                b"HTTP/1.1 200 OK\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+                None,
+            ),
+            (b"HTTP/1.1 204 No Content\r\n\r\n", Some(Body::None)),
+        ] {
+            assert_eq!(read(bytes).await?.0.answer, UpgradeAnswer::Refused(body));
+        }
+        // Another protocol, an incomplete switch, or endless interim responses fail.
+        for bytes in [
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n\r\n".as_slice(),
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n",
+            b"HTTP/1.0 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+            b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+        ] {
+            assert!(read(bytes).await.is_err());
+        }
+        Ok(())
+    }
+    #[test]
+    fn an_inspected_upgrade_is_one_exact_request_shape() -> Result<()> {
+        let parse = |head: &str, admit| {
+            parse_inspected_head(head.as_bytes(), "api.example.com", 443, admit)
+        };
+        let upgrade = "GET /socket HTTP/1.1\r\nHost: api.example.com\r\nConnection: keep-alive, Upgrade\r\nUpgrade: WebSocket\r\nSec-WebSocket-Key: key\r\n\r\n";
+        let request = parse(upgrade, true)?;
+        assert!(request.upgrade);
+        assert_eq!(
+            String::from_utf8(request.forward)?,
+            "GET /socket HTTP/1.1\r\nHost: api.example.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: key\r\n\r\n"
+        );
+        // Without admission an upgrade stays a malformed request.
+        assert!(parse(upgrade, false).is_err());
+        for head in [
+            upgrade.replace("HTTP/1.1", "HTTP/1.0"),
+            upgrade.replace("Upgrade: WebSocket", "Upgrade: websocket, h2c"),
+            upgrade.replace("Upgrade: WebSocket", "Upgrade: websocket\r\nUpgrade: h2c"),
+            upgrade.replace("Connection: keep-alive, Upgrade", "Connection: keep-alive"),
+            upgrade.replace("GET ", "POST "),
+        ] {
+            assert!(parse(&head, true).is_err(), "{head}");
+        }
+        // An ordinary request is unchanged by admission.
+        let plain = "GET / HTTP/1.1\r\nHost: api.example.com\r\n\r\n";
+        let request = parse(plain, true)?;
+        assert!(!request.upgrade);
+        assert_eq!(request.forward, parse(plain, false)?.forward);
+        assert!(
+            request
+                .forward
+                .windows(17)
+                .any(|w| w == b"Connection: close")
+        );
         Ok(())
     }
     #[tokio::test]

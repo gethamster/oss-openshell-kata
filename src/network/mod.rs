@@ -18,6 +18,6 @@ pub use guard::{
     HostedControlResponse, InfrastructureInventory, bind_hosted_broker,
 };
 pub use policy::{
-    Endpoint, InspectedEndpoint, NetworkPolicy, RestAccess, ValidatedNetworkPolicy,
+    Endpoint, InspectedEndpoint, Inspection, NetworkPolicy, RestAccess, ValidatedNetworkPolicy,
     globally_routable, normalize_host,
 };

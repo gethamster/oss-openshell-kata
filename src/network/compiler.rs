@@ -1,5 +1,5 @@
 //! Native TCP intent compiled beneath an immutable operator ceiling.
-use super::{Endpoint, InspectedEndpoint, NetworkPolicy, RestAccess};
+use super::{Endpoint, InspectedEndpoint, Inspection, NetworkPolicy, RestAccess};
 use crate::proto::openshell::sandbox::v1::{NetworkEndpoint, SandboxPolicy};
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
@@ -49,7 +49,7 @@ fn compile(
     let _intent = crate::policy::validate_policy(&without_network)?;
     let ceiling = ceiling.validate()?;
     let mut allowed = BTreeSet::new();
-    let mut inspected: BTreeMap<Endpoint, RestAccess> = BTreeMap::new();
+    let mut inspected: BTreeMap<Endpoint, Inspection> = BTreeMap::new();
     let mut public_ports = BTreeSet::new();
     for (name, rule) in &native.network_policies {
         if inspection && name.starts_with(PROVIDER_RULE_PREFIX) {
@@ -66,7 +66,7 @@ fn compile(
             }
         }
         for endpoint in &rule.endpoints {
-            let access = if inspection && endpoint.protocol == "rest" {
+            let requested = if inspection && endpoint.protocol == "rest" {
                 Some(validate_rest_endpoint(endpoint)?)
             } else {
                 validate_endpoint(endpoint)?;
@@ -80,7 +80,7 @@ fn compile(
             for port in ports {
                 let port = u16::try_from(port).context("invalid TCP port")?;
                 if is_public_host(&endpoint.host) {
-                    if access.is_some() {
+                    if requested.is_some() {
                         bail!("public-host endpoints cannot be inspected; use tls skip");
                     }
                     if port == 0 {
@@ -92,17 +92,17 @@ fn compile(
                     public_ports.insert(port);
                     continue;
                 }
-                let requested = NetworkPolicy {
+                NetworkPolicy {
                     tcp_allow: vec![Endpoint {
                         host: endpoint.host.clone(),
                         port,
                     }],
                     ..Default::default()
-                };
-                requested.validate()?;
+                }
+                .validate()?;
                 // Inspection and credentials need an exact ceiling entry;
                 // a public port only ever grants opaque TCP.
-                let within = if access.is_some() {
+                let within = if requested.is_some() {
                     ceiling.allows_exact(&endpoint.host, port)
                 } else {
                     ceiling.allows(&endpoint.host, port)
@@ -118,14 +118,17 @@ fn compile(
                 let destination = Endpoint { host, port };
                 // One destination has one transport: opaque or inspected.
                 if allowed.contains(&destination)
-                    && access.is_some() != inspected.contains_key(&destination)
+                    && requested.is_some() != inspected.contains_key(&destination)
                 {
                     bail!("destination mixes tls: skip and inspected REST rules");
                 }
-                if let Some(access) = access {
-                    let entry = inspected.entry(destination.clone()).or_insert(access);
+                if let Some(requested) = requested {
+                    let entry = inspected.entry(destination.clone()).or_insert(requested);
                     // OpenShell unions matching rules; presets are nested.
-                    *entry = (*entry).max(access);
+                    entry.access = entry.access.max(requested.access);
+                    // One destination has one behavior: as in OpenShell, the
+                    // opt-out holds only when every rule for it agrees.
+                    entry.allow_uninspected_credentials &= requested.allow_uninspected_credentials;
                 }
                 allowed.insert(destination);
             }
@@ -136,10 +139,11 @@ fn compile(
         tcp_allow: allowed.into_iter().collect(),
         tls_inspect: inspected
             .into_iter()
-            .map(|(endpoint, access)| InspectedEndpoint {
+            .map(|(endpoint, inspection)| InspectedEndpoint {
                 host: endpoint.host,
                 port: endpoint.port,
-                access,
+                access: inspection.access,
+                allow_uninspected_credentials: inspection.allow_uninspected_credentials,
             })
             .collect(),
         tcp_allow_public_ports: public_ports.into_iter().collect(),
@@ -156,7 +160,10 @@ fn is_public_host(host: &str) -> bool {
 
 /// The supported credential-bearing shape: L7 REST with TLS terminated by the
 /// host broker, enforced, with an access preset and no other L7 features.
-fn validate_rest_endpoint(endpoint: &NetworkEndpoint) -> Result<RestAccess> {
+/// `allow_uninspected_credentials` is OpenShell's opt-in to content the proxy
+/// does not read; the broker then relays a WebSocket upgrade (see
+/// `Mediation::relay`).
+fn validate_rest_endpoint(endpoint: &NetworkEndpoint) -> Result<Inspection> {
     let supported = NetworkEndpoint {
         host: endpoint.host.clone(),
         port: endpoint.port,
@@ -165,6 +172,7 @@ fn validate_rest_endpoint(endpoint: &NetworkEndpoint) -> Result<RestAccess> {
         tls: endpoint.tls,
         enforcement: endpoint.enforcement,
         access: endpoint.access,
+        allow_uninspected_credentials: endpoint.allow_uninspected_credentials,
         // The gateway stamps provider credential scope and grant provenance.
         provider_credentialed: endpoint.provider_credentialed,
         token_grant_owner: endpoint.token_grant_owner.clone(),
@@ -177,7 +185,7 @@ fn validate_rest_endpoint(endpoint: &NetworkEndpoint) -> Result<RestAccess> {
     {
         bail!(
             "REST endpoint requires unsupported fields [{}] or TLS/enforcement behavior (tls_mode={}, enforcement_mode={}); use protocol rest, an access preset and enforcement enforce without tls",
-            unsupported_fields(endpoint),
+            unsupported_fields(endpoint, true),
             endpoint.tls,
             endpoint.enforcement
         );
@@ -185,11 +193,15 @@ fn validate_rest_endpoint(endpoint: &NetworkEndpoint) -> Result<RestAccess> {
     if endpoint.port != 0 && !endpoint.ports.is_empty() && endpoint.ports != [endpoint.port] {
         bail!("ambiguous endpoint ports");
     }
-    Ok(match endpoint.access {
+    let access = match endpoint.access {
         1 => RestAccess::ReadOnly,
         2 => RestAccess::ReadWrite,
         3 => RestAccess::Full,
         _ => bail!("REST endpoint requires a read-only, read-write or full access preset"),
+    };
+    Ok(Inspection {
+        access,
+        allow_uninspected_credentials: endpoint.allow_uninspected_credentials,
     })
 }
 
@@ -214,7 +226,7 @@ fn validate_endpoint(endpoint: &NetworkEndpoint) -> Result<()> {
     {
         bail!(
             "endpoint requires unsupported fields [{}], protocol or TLS behavior (tcp={}, tls_mode={}, enforcement_mode={}); use explicit tls skip and TCP",
-            unsupported_fields(endpoint),
+            unsupported_fields(endpoint, false),
             matches!(endpoint.protocol.as_str(), "" | "tcp"),
             endpoint.tls,
             endpoint.enforcement
@@ -233,7 +245,9 @@ fn valid_owner(owner: &str) -> bool {
             .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-fn unsupported_fields(e: &NetworkEndpoint) -> String {
+/// The set fields a refusal names. An inspected REST endpoint supports
+/// `allow_uninspected_credentials`; an opaque TCP endpoint never does.
+fn unsupported_fields(e: &NetworkEndpoint, inspected: bool) -> String {
     [
         ("access", e.access != 0),
         ("rules", !e.rules.is_empty()),
@@ -264,7 +278,7 @@ fn unsupported_fields(e: &NetworkEndpoint) -> String {
         ("credential_binding", e.credential_binding.is_some()),
         (
             "allow_uninspected_credentials",
-            e.allow_uninspected_credentials,
+            e.allow_uninspected_credentials && !inspected,
         ),
         ("provider_credentialed", e.provider_credentialed),
         ("token_grant_owner", !e.token_grant_owner.is_empty()),

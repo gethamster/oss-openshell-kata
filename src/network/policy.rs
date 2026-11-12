@@ -47,6 +47,20 @@ pub struct InspectedEndpoint {
     pub host: String,
     pub port: u16,
     pub access: RestAccess,
+    /// OpenShell's `allow_uninspected_credentials`: the destination may carry
+    /// content the broker does not read. Here it admits a WebSocket upgrade,
+    /// whose messages the broker relays unread after the handshake. Omitted
+    /// when false, so earlier policy encodings and digests are unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_uninspected_credentials: bool,
+}
+
+/// How the broker handles one inspected destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Inspection {
+    pub access: RestAccess,
+    /// Whether a WebSocket upgrade is relayed instead of refused.
+    pub allow_uninspected_credentials: bool,
 }
 
 /// Maximum distinct public TCP ports in one policy.
@@ -72,7 +86,7 @@ pub struct NetworkPolicy {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatedNetworkPolicy {
     allowed: BTreeSet<Endpoint>,
-    inspected: BTreeMap<Endpoint, RestAccess>,
+    inspected: BTreeMap<Endpoint, Inspection>,
     public_ports: BTreeSet<u16>,
 }
 impl NetworkPolicy {
@@ -145,7 +159,11 @@ impl NetworkPolicy {
             if key.host.parse::<IpAddr>().is_ok() {
                 bail!("inspected destinations require a DNS name for TLS verification");
             }
-            if inspected.insert(key, endpoint.access).is_some() {
+            let inspection = Inspection {
+                access: endpoint.access,
+                allow_uninspected_credentials: endpoint.allow_uninspected_credentials,
+            };
+            if inspected.insert(key, inspection).is_some() {
                 bail!("duplicate inspected destination");
             }
         }
@@ -170,10 +188,11 @@ impl ValidatedNetworkPolicy {
             tls_inspect: self
                 .inspected
                 .iter()
-                .map(|(endpoint, access)| InspectedEndpoint {
+                .map(|(endpoint, inspection)| InspectedEndpoint {
                     host: endpoint.host.clone(),
                     port: endpoint.port,
-                    access: *access,
+                    access: inspection.access,
+                    allow_uninspected_credentials: inspection.allow_uninspected_credentials,
                 })
                 .collect(),
             tcp_allow_public_ports: self.public_ports.iter().copied().collect(),
@@ -198,8 +217,8 @@ impl ValidatedNetworkPolicy {
     pub fn allows_public_port(&self, port: u16) -> bool {
         self.public_ports.contains(&port)
     }
-    /// The REST access of a destination the broker must inspect, if any.
-    pub fn inspection(&self, host: &str, port: u16) -> Option<RestAccess> {
+    /// How the broker must inspect a destination, if it inspects it at all.
+    pub fn inspection(&self, host: &str, port: u16) -> Option<Inspection> {
         let host = normalize_host(host).ok()?;
         self.inspected.get(&Endpoint { host, port }).copied()
     }

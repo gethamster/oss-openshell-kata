@@ -5,7 +5,7 @@
 //! applies the endpoint's REST access preset, substitutes placeholders with
 //! OpenShell's endpoint-bound resolver, and originates verified TLS upstream.
 //! Real credentials and the CA private key never leave this host process.
-use super::{RestAccess, proxy};
+use super::{Inspection, proxy};
 use anyhow::{Context, Result, anyhow, bail};
 use openshell_core::{
     proto::v1::GetSandboxProviderEnvironmentResponse,
@@ -18,13 +18,14 @@ use openshell_supervisor_network::l7::tls::{
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     net::IpAddr,
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio_util::sync::CancellationToken;
 
 /// Upper bound of one serialized provider snapshot.
 pub const MAX_SNAPSHOT_BYTES: usize = 256 * 1024;
@@ -85,6 +86,8 @@ pub struct Mediation {
     tls: Option<(ProxyTlsState, String)>,
     credentials: ProviderCredentialState,
     revision: Mutex<u64>,
+    /// Ends every relayed WebSocket when credentials are revoked.
+    upgraded: Mutex<CancellationToken>,
 }
 
 impl Mediation {
@@ -121,6 +124,7 @@ impl Mediation {
                 HashMap::new(),
             ),
             revision: Mutex::new(0),
+            upgraded: Mutex::new(CancellationToken::new()),
         })
     }
 
@@ -163,15 +167,21 @@ impl Mediation {
             .revision
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = self.credential_names();
         match self.prepare(snapshot) {
             Ok(installed) => {
                 *revision = installed;
+                // A refreshed credential keeps its sockets; a removed one does not.
+                if !before.is_subset(&self.credential_names()) {
+                    self.close_upgraded();
+                }
                 self.material(installed, None)
             }
             Err(error) => {
                 self.credentials
                     .revoke_static_provider_environment(self.credentials.revision());
                 *revision = 0;
+                self.close_upgraded();
                 self.material(0, Some(error.to_string()))
             }
         }
@@ -186,6 +196,23 @@ impl Mediation {
         self.credentials
             .revoke_static_provider_environment(self.credentials.revision());
         *revision = 0;
+        self.close_upgraded();
+    }
+
+    fn credential_names(&self) -> BTreeSet<String> {
+        self.environment()
+            .map(|environment| environment.into_keys().collect())
+            .unwrap_or_default()
+    }
+
+    /// A relayed WebSocket was authorized by a credential in its handshake,
+    /// so none outlives a revocation or the removal of a credential.
+    fn close_upgraded(&self) {
+        let mut upgraded = self
+            .upgraded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut *upgraded).cancel();
     }
 
     fn prepare(&self, snapshot: &[u8]) -> Result<u64> {
@@ -281,13 +308,19 @@ impl Mediation {
     }
 
     /// Serve one inspected HTTPS request on an established CONNECT tunnel.
+    ///
+    /// The broker reads and rewrites the request head only; a request body is
+    /// relayed unread. A WebSocket upgrade is admitted only where the policy
+    /// sets `allow_uninspected_credentials`: after the origin answers `101`
+    /// the tunnel carries frames in both directions, unread, until either
+    /// side closes or the credentials are revoked.
     pub(super) async fn relay<C, U>(
         &self,
         client: C,
         upstream: U,
         host: &str,
         port: u16,
-        access: RestAccess,
+        inspection: Inspection,
     ) -> Result<()>
     where
         C: AsyncRead + AsyncWrite + Unpin + Send,
@@ -307,17 +340,33 @@ impl Mediation {
         let mut client = BufReader::new(client);
         let request = match tokio::time::timeout(
             Duration::from_secs(30),
-            proxy::read_inspected_head(&mut client, host, port),
+            proxy::read_inspected_head(
+                &mut client,
+                host,
+                port,
+                inspection.allow_uninspected_credentials,
+            ),
         )
         .await
         {
             Ok(Ok(request)) => request,
             _ => return respond(&mut client, "400 Bad Request").await,
         };
-        if !access.allows(&request.method) {
+        // A WebSocket carries client messages, so it needs a preset that
+        // admits a request body.
+        if !inspection.access.allows(&request.method)
+            || (request.upgrade && !inspection.access.allows("POST"))
+        {
             tracing::info!(%host, port, method=%request.method, "inspected request denied by access preset");
             return respond(&mut client, "403 Forbidden").await;
         }
+        // Taken before the credential is resolved, so a revocation at any
+        // later point ends the WebSocket this request may open.
+        let revoked = self
+            .upgraded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let resolver = self
             .credentials
             .resolver_for_endpoint(host, port, &request.target);
@@ -325,6 +374,14 @@ impl Mediation {
             tracing::info!(%host, port, "request carries a credential placeholder unavailable at this endpoint");
             return respond(&mut client, "403 Forbidden").await;
         };
+        // An origin echoes the subprotocol it selects in its `101`, which the
+        // guest reads: a credential must never be substituted into it.
+        if request.upgrade
+            && websocket_fields(&request.forward) != websocket_fields(&rewritten.rewritten)
+        {
+            tracing::info!(%host, port, "upgrade carries a credential placeholder in a WebSocket field");
+            return respond(&mut client, "403 Forbidden").await;
+        }
         let upstream = match tokio::time::timeout(
             Duration::from_secs(15),
             tls_connect_upstream(upstream, host, tls.upstream_config()),
@@ -340,6 +397,53 @@ impl Mediation {
         let (client_read, mut client_write) = tokio::io::split(client);
         // The inner reader still serves bytes it buffered while reading the head.
         let mut client_read = BufReader::new(client_read);
+        if request.upgrade {
+            let mut upstream_read = BufReader::new(upstream_read);
+            let response = match tokio::time::timeout(
+                Duration::from_secs(30),
+                proxy::read_upgrade_response(&mut upstream_read),
+            )
+            .await
+            {
+                Ok(Ok(response)) => response,
+                _ => return respond(&mut client_write, "502 Bad Gateway").await,
+            };
+            client_write.write_all(&response.head).await?;
+            match response.answer {
+                proxy::UpgradeAnswer::Switched => {
+                    tracing::info!(%host, port, "inspected destination upgraded to WebSocket");
+                    // A WebSocket ends for both sides when either one closes.
+                    tokio::select! {
+                        biased;
+                        () = revoked.cancelled() => {}
+                        result = tokio::io::copy(&mut client_read, &mut upstream_write) => { result?; }
+                        result = tokio::io::copy(&mut upstream_read, &mut client_write) => { result?; }
+                    }
+                    let _ = upstream_write.shutdown().await;
+                }
+                // The origin kept HTTP: the guest gets this one response and no
+                // further request reaches the origin on this tunnel.
+                proxy::UpgradeAnswer::Refused(body) => {
+                    let forward = async {
+                        match body {
+                            Some(body) => {
+                                proxy::forward_body(&mut upstream_read, &mut client_write, body)
+                                    .await
+                            }
+                            None => tokio::io::copy(&mut upstream_read, &mut client_write)
+                                .await
+                                .map(drop)
+                                .map_err(Into::into),
+                        }
+                    };
+                    tokio::time::timeout(Duration::from_secs(30), forward)
+                        .await
+                        .context("origin response timed out")??;
+                }
+            }
+            client_write.shutdown().await?;
+            return Ok(());
+        }
         {
             let body = proxy::forward_body(&mut client_read, &mut upstream_write, request.body);
             // The forwarded request asks the origin to close after its response.
@@ -353,6 +457,16 @@ impl Mediation {
         client_write.shutdown().await?;
         Ok(())
     }
+}
+
+/// The `Sec-WebSocket-*` lines of a request head.
+fn websocket_fields(head: &[u8]) -> Vec<&[u8]> {
+    const PREFIX: &[u8] = b"sec-websocket-";
+    head.split(|byte| *byte == b'\n')
+        .filter(|line| {
+            line.len() >= PREFIX.len() && line[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
+        })
+        .collect()
 }
 
 async fn respond(client: &mut (impl AsyncWrite + Unpin), status: &str) -> Result<()> {

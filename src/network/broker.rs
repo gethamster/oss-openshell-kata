@@ -304,12 +304,12 @@ async fn connection(
     let mediation = match (inspection, mediation) {
         (None, _) => None,
         // Credential injection requires TLS through CONNECT, from this guest only.
-        (Some(access), Some(mediation))
+        (Some(inspection), Some(mediation))
             if request.forward.is_none()
                 && mediation.inspects()
                 && mediation.admits_peer(peer.ip()) =>
         {
-            Some((access, mediation))
+            Some((inspection, mediation))
         }
         (Some(_), _) => {
             tracing::info!(host=%request.target.host,port=request.target.port,"inspected destination refused outside its guest tunnel");
@@ -340,7 +340,7 @@ async fn connection(
     let Some(mut upstream) = upstream else {
         return reject(&mut writer, "502 Bad Gateway").await;
     };
-    if let Some((access, mediation)) = mediation {
+    if let Some((inspection, mediation)) = mediation {
         writer
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await?;
@@ -351,7 +351,7 @@ async fn connection(
                 upstream,
                 &request.target.host,
                 request.target.port,
-                access,
+                inspection,
             )
             .await;
     }
