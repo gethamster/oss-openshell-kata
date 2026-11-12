@@ -9,6 +9,14 @@ pub mod mediation;
 mod policy;
 mod proxy;
 
+/// Policy features of this broker that an older one refuses, declared for
+/// release tooling. oss-sre reads this exact line from the `kata-network`
+/// binary (`scripts/standalone_release.py`) and writes
+/// `allow_uninspected_credentials` into a Kata placement policy only for a
+/// driver that declares it. `kata-network --help` prints it. Never remove or
+/// reword a line while the feature is supported; add one line per feature.
+pub const POLICY_FEATURES: &str = "openshell-kata-policy-feature: allow_uninspected_credentials";
+
 pub use broker::{BrokerHandle, bind_broker};
 pub use cli::{NetworkCli, run_network};
 pub use compiler::{compile_native, compile_native_with_inspection};
