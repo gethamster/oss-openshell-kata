@@ -20,6 +20,7 @@ use tokio::{
 
 /// Standalone outer-host network broker and fence operations.
 #[derive(Debug, Parser)]
+#[command(after_help = super::POLICY_FEATURES)]
 pub struct NetworkCli {
     #[command(subcommand)]
     command: Command,
@@ -479,6 +480,18 @@ pub async fn run_network(cli: NetworkCli) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_binary_declares_its_policy_features_to_release_tooling() {
+        use clap::CommandFactory as _;
+        // oss-sre matches this exact line in the `kata-network` binary.
+        assert_eq!(
+            crate::network::POLICY_FEATURES,
+            "openshell-kata-policy-feature: allow_uninspected_credentials"
+        );
+        let help = NetworkCli::command().render_help().to_string();
+        assert!(help.contains(crate::network::POLICY_FEATURES), "{help}");
+    }
 
     #[test]
     fn credential_control_requests_never_format_snapshots() {
